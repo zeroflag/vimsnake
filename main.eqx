@@ -84,6 +84,12 @@ $playing -> var state
 
 : draw-score "Score: " score .. 0 0 translate draw-text ;
 
+: draw-message
+  state $game-over = if
+    "Game Over!" cx 3 - cy 1 -
+    translate draw-text
+  then ;
+
 \ Collision detection
 
 : x= ( p1 p2 -- bool ) $x @ swap $x @ = ;
@@ -149,10 +155,7 @@ $playing -> var state
   3 spawn-snake ;
 
 : love.draw
-  state $game-over = if
-    white color "Game Over!"
-    cx 3 - cy 1 - translate draw-text
-  then
+  white color draw-message
   green color draw-snake
   blue  color draw-cage
   red   color draw-food
