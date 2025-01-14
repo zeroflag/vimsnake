@@ -23,7 +23,7 @@ height 2 / floor -> var cy
 var input
 var state
 
-0.125    -> var refresh_rate
+0.125  -> var refresh_rate
 
 1 -> var vx
 0 -> var vy
@@ -93,8 +93,8 @@ var state
 
 : draw-message
   state $game-over = if
-    "Game Over! Press SPACE to restart." cx 8 - cy 1 -
-    translate draw-text
+    "Game Over! Press SPACE to restart."
+    cx 8 - cy 1 - translate draw-text
   then ;
 
 \ Collision detection
@@ -150,7 +150,7 @@ var state
     $j of turn-down  endof
     $h of turn-left  endof
     $l of turn-right endof
-    drop    ( input )
+    drop ( input )
   endcase ;
 
 \ Love2D callbacks
@@ -161,10 +161,10 @@ var state
   init ;
 
 : love.draw
-  white color draw-message
   green color draw-snake
   blue  color draw-cage
   red   color draw-food
+  white color draw-message
   white color draw-score ;
 
 : love.update (: dt :)
@@ -177,6 +177,11 @@ var state
   then ;
 
 : love.keypressed (: key :)
-  $escape key = if os.exit/0 then
-  $space key = $game-over state = and if init then
-  key -> input ;
+  key case
+    $escape of 0 love.event.quit~1 endof
+    $space  of $game-over state = if
+                 init
+               then
+            endof
+    ( key ) -> input
+  endcase ;
