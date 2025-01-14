@@ -22,7 +22,7 @@ height 2 / floor -> var cy
 
 var input
 $started -> var state
-0.1 -> var refresh_rate
+0.125 -> var refresh_rate
 
 1 -> var vx
 0 -> var vy
@@ -93,8 +93,8 @@ $started -> var state
   blue  color draw-cage
   red   color draw-food ;
 
-: =x ( p1 p2 -- bool ) $x at swap $x at = ;
-: =y ( p1 p2 -- bool ) $y at swap $y at = ;
+: =x ( p1 p2 -- bool ) $x @ swap $x @ = ;
+: =y ( p1 p2 -- bool ) $y @ swap $y @ = ;
 
 : hit? ( point -- bool )
   dup  head =x
@@ -112,8 +112,8 @@ $started -> var state
       true exit
     then
   loop
-  head $x @ 1 < head $x at width  1 - >= or
-  head $y @ 1 < head $y at height 1 - >= or
+  head $x @ 1 < head $x @ width  1 - >= or
+  head $y @ 1 < head $y @ height 1 - >= or
   or ;
 
 : detect-hit
