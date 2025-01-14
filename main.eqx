@@ -1,4 +1,4 @@
-( Simple Snake game written in Equinox )
+( Simple Snake game written in Equinox Forth )
 ( Use Vim keys, H J K L to control )
 
 alias: love.graphics.rectangle~5 draw-rect
@@ -6,8 +6,8 @@ alias: math.floor/1 floor
 alias: math.random/2 rnd
 alias: love.graphics.setColor~3 color
 
-love.graphics.getWidth/  -> var scr_w
-love.graphics.getHeight/ -> var scr_h
+love.graphics.getWidth/0  -> var scr_w
+love.graphics.getHeight/0 -> var scr_h
 
 scr_w scr_h / -> var aspect_ratio
 
@@ -28,6 +28,7 @@ $playing -> var state
 1 -> var vx
 0 -> var vy
 0 -> var time
+0 -> var score
 
 [] -> var snake
 {} -> var food
@@ -54,12 +55,12 @@ $playing -> var state
 \ Drawing and graphics
 
 : translate ( x y -- nx ny ) cell_h * swap cell_w * swap ;
-: text ( s x y -- ) 0 3 3 love.graphics.print~6 ;
+: draw-text ( s x y -- ) 0 3 3 love.graphics.print~6 ;
 
-: white 1 1 1 ;
 : red   1 0 0 ;
-: blue  0 0 1 ;
 : green 0 1 0 ;
+: blue  0 0 1 ;
+: white 1 1 1 ;
 
 : draw-block ( x y -- )
   "fill" -rot ( x y ) translate cell_w cell_h draw-rect ;
@@ -80,6 +81,8 @@ $playing -> var state
     0         i draw-block
     width 1 - i draw-block
   loop ;
+
+: draw-score "Score: " score .. 0 0 translate draw-text ;
 
 \ Collision detection
 
@@ -116,6 +119,7 @@ $playing -> var state
   then
   food hit? if
     spawn-food
+    score 1 + -> score
   else
     cut
   then ;
@@ -147,11 +151,12 @@ $playing -> var state
 : love.draw
   state $game-over = if
     white color "Game Over!"
-    cx 3 - cy 1 - translate text
+    cx 3 - cy 1 - translate draw-text
   then
   green color draw-snake
   blue  color draw-cage
-  red   color draw-food ;
+  red   color draw-food
+  white color draw-score ;
 
 : love.update (: dt :)
   state $game-over = if exit then
