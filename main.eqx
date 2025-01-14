@@ -149,7 +149,7 @@ $playing -> var state
 \ Love2D callbacks
 
 : love.load
-  os.time/0 math.randomseed/1
+  os.time/0 math.randomseed~1
   true love.window.setFullscreen~1
   spawn-food
   3 spawn-snake ;
@@ -162,8 +162,8 @@ $playing -> var state
   white color draw-score ;
 
 : love.update (: dt :)
-  state $game-over = if exit then
-  dt refresh? if
+  state $game-over !=
+  dt refresh? and if
     control
     advance
     detect-hit
