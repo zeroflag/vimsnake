@@ -1,0 +1,155 @@
+alias: love.graphics.rectangle/5 draw-rect
+alias: math.floor/1 floor
+alias: math.random/2 rnd
+alias: love.graphics.setColor/3 color
+
+love.graphics.getWidth/  -> var scr_w
+love.graphics.getHeight/ -> var scr_h
+
+scr_w scr_h / -> var aspect_ratio
+
+50 -> var width
+width aspect_ratio / floor -> var height
+
+scr_w width  / -> var cell_w
+scr_h height / -> var cell_h
+
+width  2 / floor -> var cx
+height 2 / floor -> var cy
+
+1 -> var vx
+0 -> var vy
+0 -> var time
+
+[] -> var snake
+{} -> var food
+
+$started -> var state
+
+var input
+
+0.1 -> var refresh_rate
+
+: refresh? ( dt -- bool )
+  time + -> time
+  time refresh_rate > ;
+
+: reset 0 -> time ;
+
+: length snake size ;
+: head   snake length @ ;
+: cut snake 1 remove ;
+
+: spawn-snake ( len -- )
+  2 / floor dup -1 * do
+    snake { $x cx i +  $y cy } append
+  loop ;
+
+: spawn-food
+  1 width  2 - rnd -> food.x
+  1 height 2 - rnd -> food.y ;
+
+: love.load
+  os.time/0 math.randomseed/1
+  true love.window.setFullscreen/1
+  spawn-food
+  3 spawn-snake ;
+
+: translate ( x y -- nx ny )
+  cell_h * swap cell_w * swap ;
+
+: print ( s x y -- ) 0 3 3 love.graphics.print/6 ;
+
+: white 1 1 1 ;
+: red   1 0 0 ;
+: blue  0 0 1 ;
+: green 0 1 0 ;
+
+: draw-block ( x y -- )
+  "fill" -rot ( x y ) translate cell_w cell_h draw-rect ;
+
+: draw-snake
+  snake ipairs: i each
+    each.x each.y draw-block
+  end ;
+
+: draw-food food.x food.y draw-block ;
+
+: draw-cage
+  width 0 do
+    i 0 draw-block
+    i height 1 - draw-block
+  loop
+  height 0 do
+    0 i draw-block
+    width 1 - i draw-block
+  loop ;
+
+: love.draw
+  state $game-over = if
+    white color
+    "Game Over!" cx 3 - cy 1 - translate print
+  then
+  green color draw-snake
+  blue  color draw-cage
+  red   color draw-food ;
+
+: =x ( p1 p2 -- bool ) $x at swap $x at = ;
+: =y ( p1 p2 -- bool ) $y at swap $y at = ;
+
+: hit? ( point -- bool )
+  dup  head =x
+  swap head =y and ;
+
+: advance
+  snake
+  { $x head $x @ vx +
+    $y head $y @ vy + }
+  append ;
+
+: crashed? ( -- bool )
+  length 1 do
+    head snake i @ hit? if
+      true exit
+    then
+  loop
+  head $x @ 1 < head $x at width  1 - >= or
+  head $y @ 1 < head $y at height 1 - >= or
+  or ;
+
+: detect-hit
+  crashed? if
+    $game-over -> state
+  then
+  food hit? if
+    spawn-food
+  else
+    cut
+  then ;
+
+: turn-left  vx  1 != if -1 -> vx 0 -> vy then ;
+: turn-right vx -1 != if  1 -> vx 0 -> vy then ;
+: turn-up    vy  1 != if -1 -> vy 0 -> vx then ;
+: turn-down  vy -1 != if  1 -> vy 0 -> vx then ;
+
+: control
+  input case
+    $up     of turn-up    endof
+    $down   of turn-down  endof
+    $left   of turn-left  endof
+    $right  of turn-right endof
+    drop    ( input )
+  endcase ;
+
+: love.update (: dt :)
+  state $game-over = if exit then
+  dt refresh? if
+    control
+    advance
+    detect-hit
+    reset
+  then ;
+
+: love.keypressed (: key :)
+  $escape key = if os.exit/0 then
+  key -> input ;
