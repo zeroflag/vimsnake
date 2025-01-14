@@ -21,8 +21,8 @@ width  2 / floor -> var cx
 height 2 / floor -> var cy
 
 var input
+var state
 
-$playing -> var state
 0.125    -> var refresh_rate
 
 1 -> var vx
@@ -44,6 +44,7 @@ $playing -> var state
 : cut snake 1 remove ;
 
 : spawn-snake ( len -- )
+  [] -> snake
   2 / floor dup -1 * do
     snake { $x cx i +  $y cy } append
   loop ;
@@ -51,6 +52,12 @@ $playing -> var state
 : spawn-food
   1 width  2 - rnd -> food.x
   1 height 2 - rnd -> food.y ;
+
+: init
+  $playing -> state
+  0 -> score
+  spawn-food
+  3 spawn-snake ;
 
 \ Drawing and graphics
 
@@ -86,7 +93,7 @@ $playing -> var state
 
 : draw-message
   state $game-over = if
-    "Game Over!" cx 3 - cy 1 -
+    "Game Over! Press SPACE to restart." cx 8 - cy 1 -
     translate draw-text
   then ;
 
@@ -151,8 +158,7 @@ $playing -> var state
 : love.load
   os.time/0 math.randomseed~1
   true love.window.setFullscreen~1
-  spawn-food
-  3 spawn-snake ;
+  init ;
 
 : love.draw
   white color draw-message
@@ -172,4 +178,5 @@ $playing -> var state
 
 : love.keypressed (: key :)
   $escape key = if os.exit/0 then
+  $space key = $game-over state = and if init then
   key -> input ;
