@@ -1,3 +1,6 @@
+( Simple Snake game written in Equinox )
+( Use Vim keys, H J K L to control )
+
 alias: love.graphics.rectangle/5 draw-rect
 alias: math.floor/1 floor
 alias: math.random/2 rnd
@@ -17,6 +20,10 @@ scr_h height / -> var cell_h
 width  2 / floor -> var cx
 height 2 / floor -> var cy
 
+var input
+$started -> var state
+0.1 -> var refresh_rate
+
 1 -> var vx
 0 -> var vy
 0 -> var time
@@ -24,20 +31,14 @@ height 2 / floor -> var cy
 [] -> var snake
 {} -> var food
 
-$started -> var state
-
-var input
-
-0.1 -> var refresh_rate
-
 : refresh? ( dt -- bool )
   time + -> time
   time refresh_rate > ;
 
-: reset 0 -> time ;
+: reset-timer 0 -> time ;
 
-: length snake size ;
-: head   snake length @ ;
+: len  ( -- n ) snake size ;
+: head ( -- p ) snake len @ ;
 : cut snake 1 remove ;
 
 : spawn-snake ( len -- )
@@ -55,9 +56,7 @@ var input
   spawn-food
   3 spawn-snake ;
 
-: translate ( x y -- nx ny )
-  cell_h * swap cell_w * swap ;
-
+: translate ( x y -- nx ny ) cell_h * swap cell_w * swap ;
 : print ( s x y -- ) 0 3 3 love.graphics.print/6 ;
 
 : white 1 1 1 ;
@@ -69,7 +68,7 @@ var input
   "fill" -rot ( x y ) translate cell_w cell_h draw-rect ;
 
 : draw-snake
-  snake ipairs: i each
+  snake ipairs: _ each
     each.x each.y draw-block
   end ;
 
@@ -108,7 +107,7 @@ var input
   append ;
 
 : crashed? ( -- bool )
-  length 1 do
+  len 1 do
     head snake i @ hit? if
       true exit
     then
@@ -134,10 +133,10 @@ var input
 
 : control
   input case
-    $up     of turn-up    endof
-    $down   of turn-down  endof
-    $left   of turn-left  endof
-    $right  of turn-right endof
+    $k of turn-up    endof
+    $j of turn-down  endof
+    $h of turn-left  endof
+    $l of turn-right endof
     drop    ( input )
   endcase ;
 
@@ -147,7 +146,7 @@ var input
     control
     advance
     detect-hit
-    reset
+    reset-timer
   then ;
 
 : love.keypressed (: key :)
