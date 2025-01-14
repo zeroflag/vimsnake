@@ -1,10 +1,10 @@
 ( Simple Snake game written in Equinox )
 ( Use Vim keys, H J K L to control )
 
-alias: love.graphics.rectangle/5 draw-rect
+alias: love.graphics.rectangle~5 draw-rect
 alias: math.floor/1 floor
 alias: math.random/2 rnd
-alias: love.graphics.setColor/3 color
+alias: love.graphics.setColor~3 color
 
 love.graphics.getWidth/  -> var scr_w
 love.graphics.getHeight/ -> var scr_h
@@ -21,8 +21,9 @@ width  2 / floor -> var cx
 height 2 / floor -> var cy
 
 var input
-$started -> var state
-0.125 -> var refresh_rate
+
+$playing -> var state
+0.125    -> var refresh_rate
 
 1 -> var vx
 0 -> var vy
@@ -50,14 +51,10 @@ $started -> var state
   1 width  2 - rnd -> food.x
   1 height 2 - rnd -> food.y ;
 
-: love.load
-  os.time/0 math.randomseed/1
-  true love.window.setFullscreen/1
-  spawn-food
-  3 spawn-snake ;
+\ Drawing and graphics
 
 : translate ( x y -- nx ny ) cell_h * swap cell_w * swap ;
-: print ( s x y -- ) 0 3 3 love.graphics.print/6 ;
+: text ( s x y -- ) 0 3 3 love.graphics.print~6 ;
 
 : white 1 1 1 ;
 : red   1 0 0 ;
@@ -76,29 +73,22 @@ $started -> var state
 
 : draw-cage
   width 0 do
-    i 0 draw-block
+    i 0          draw-block
     i height 1 - draw-block
   loop
   height 0 do
-    0 i draw-block
+    0         i draw-block
     width 1 - i draw-block
   loop ;
 
-: love.draw
-  state $game-over = if
-    white color
-    "Game Over!" cx 3 - cy 1 - translate print
-  then
-  green color draw-snake
-  blue  color draw-cage
-  red   color draw-food ;
+\ Collision detection
 
-: =x ( p1 p2 -- bool ) $x @ swap $x @ = ;
-: =y ( p1 p2 -- bool ) $y @ swap $y @ = ;
+: x= ( p1 p2 -- bool ) $x @ swap $x @ = ;
+: y= ( p1 p2 -- bool ) $y @ swap $y @ = ;
 
 : hit? ( point -- bool )
-  dup  head =x
-  swap head =y and ;
+  dup  head x=
+  swap head y= and ;
 
 : advance
   snake
@@ -106,18 +96,22 @@ $started -> var state
     $y head $y @ vy + }
   append ;
 
-: crashed? ( -- bool )
-  len 1 do
-    head snake i @ hit? if
-      true exit
-    then
-  loop
+: hit-wall? ( -- bool )
   head $x @ 1 < head $x @ width  1 - >= or
   head $y @ 1 < head $y @ height 1 - >= or
   or ;
 
+: hit-self? ( -- bool )
+  len 1 do
+    snake i @ hit? if
+      true exit
+    then
+  loop
+  false ;
+
 : detect-hit
-  crashed? if
+  hit-wall?
+  hit-self? or if
     $game-over -> state
   then
   food hit? if
@@ -125,6 +119,8 @@ $started -> var state
   else
     cut
   then ;
+
+\ Input handling
 
 : turn-left  vx  1 != if -1 -> vx 0 -> vy then ;
 : turn-right vx -1 != if  1 -> vx 0 -> vy then ;
@@ -139,6 +135,23 @@ $started -> var state
     $l of turn-right endof
     drop    ( input )
   endcase ;
+
+\ Love2D callbacks
+
+: love.load
+  os.time/0 math.randomseed/1
+  true love.window.setFullscreen~1
+  spawn-food
+  3 spawn-snake ;
+
+: love.draw
+  state $game-over = if
+    white color "Game Over!"
+    cx 3 - cy 1 - translate text
+  then
+  green color draw-snake
+  blue  color draw-cage
+  red   color draw-food ;
 
 : love.update (: dt :)
   state $game-over = if exit then
