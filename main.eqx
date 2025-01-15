@@ -54,8 +54,11 @@ var state
   1 height 2 - rnd -> food.y ;
 
 : init
-  $playing -> state
   0 -> score
+  1 -> vx
+  0 -> vy
+  nil -> input
+  $playing -> state
   spawn-food
   3 spawn-snake ;
 
