@@ -1,11 +1,11 @@
 ( Simple Snake game written in Equinox Forth )
 ( Use Vim keys, H J K L to control )
 
-alias: draw-rect  #( love.graphics.rectangle 5 0 )
-alias: floor      #( math.floor 1 )
-alias: rnd        #( math.random 2 )
-alias: color      #( love.graphics.setColor 3 0 )
-alias: fullscreen #( love.window.setFullscreen 1 0 )
+alias: draw-rect #( love.graphics.rectangle 5 0 )
+alias: floor     #( math.floor 1 )
+alias: rnd       #( math.random 2 )
+alias: color     #( love.graphics.setColor 3 0 )
+alias: fullscr   #( love.window.setFullscreen 1 0 )
 
 #( love.graphics.getWidth  ) -> var scr_w
 #( love.graphics.getHeight ) -> var scr_h
@@ -24,7 +24,7 @@ height 2 / floor -> var cy
 var input
 var state
 
-0.125  -> var refresh_rate
+0.125 -> var refresh_rate
 
 1 -> var vx
 0 -> var vy
@@ -160,9 +160,8 @@ var state
 \ Love2D callbacks
 
 : love.load
-  #( os.time )
-  #( math.randomseed 1 0 )
-  true fullscreen
+  #( os.time ) #( math.randomseed 1 0 )
+  true fullscr
   init ;
 
 : love.draw
