@@ -1,14 +1,14 @@
 ( Simple Snake game written in Equinox Forth )
 ( Use Vim keys, H J K L to control )
 
-alias: draw-rect >p love.graphics.rectangle 5
-alias: floor >f math.floor 1
-alias: rnd >f math.random 2
-alias: color >p love.graphics.setColor 3
-alias: fullscreen >p love.window.setFullscreen 1
+alias: draw-rect  #( love.graphics.rectangle 5 0 )
+alias: floor      #( math.floor 1 )
+alias: rnd        #( math.random 2 )
+alias: color      #( love.graphics.setColor 3 0 )
+alias: fullscreen #( love.window.setFullscreen 1 0 )
 
->f love.graphics.getWidth  0 -> var scr_w
->f love.graphics.getHeight 0 -> var scr_h
+#( love.graphics.getWidth  ) -> var scr_w
+#( love.graphics.getHeight ) -> var scr_h
 
 scr_w scr_h / -> var aspect_ratio
 
@@ -66,7 +66,7 @@ var state
 \ Drawing and graphics
 
 : translate ( x y -- nx ny ) cell_h * swap cell_w * swap ;
-: draw-text ( s x y -- ) 0 3 3 >p love.graphics.print 6 ;
+: draw-text ( s x y -- ) 0 3 3 #( love.graphics.print 6 0 ) ;
 
 : red   1 0 0 ;
 : green 0 1 0 ;
@@ -160,7 +160,8 @@ var state
 \ Love2D callbacks
 
 : love.load
-  >f os.time 0 >p math.randomseed 1
+  #( os.time )
+  #( math.randomseed 1 0 )
   true fullscreen
   init ;
 
@@ -183,7 +184,7 @@ var state
 : love.keypressed (: key :)
   key case
     $escape of
-      0 >p love.event.quit 1
+      #( love.event.quit )
     endof
     $space  of
       $game-over state = if
