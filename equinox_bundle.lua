@@ -19,6 +19,10 @@ function ast.func_header(func_name, global)
   }
 end
 
+function ast.end_func(func_name)
+  return {name = "end_func", func_name = func_name}
+end
+
 function ast.func_call(func_name, ...)
   return {
     name = "func_call",
@@ -539,9 +543,9 @@ package.preload[ "ast_optimizer" ] = function( ... ) local arg = _G.arg;
 local Optimizer = {}
 local matchers = require("ast_matchers")
 
-function Optimizer.new()
+function Optimizer:new()
   local obj = {logging = false, enabled = true}
-  setmetatable(obj, {__index = Optimizer})
+  setmetatable(obj, {__index = self})
   return obj
 end
 
@@ -608,7 +612,7 @@ do
 local _ENV = _ENV
 package.preload[ "aux" ] = function( ... ) local arg = _G.arg;
 local Stack = require("stack_def")
-local aux = Stack.new("aux-stack")
+local aux = Stack:new("aux-stack")
 
 return aux
 end
@@ -619,9 +623,9 @@ local _ENV = _ENV
 package.preload[ "codegen" ] = function( ... ) local arg = _G.arg;
 local CodeGen = {}
 
-function CodeGen.new()
+function CodeGen:new()
   local obj = {}
-  setmetatable(obj, {__index = CodeGen})
+  setmetatable(obj, {__index = self})
   return obj
 end
 
@@ -758,7 +762,10 @@ function CodeGen:gen(ast)
       result = result .. p
       if i < #ast.params then result = result .. "," end
     end
-    return result .. ")\n"
+    return result .. ")"
+  end
+  if "end_func" == ast.name then
+    return "end"
   end
   error("Unknown AST: " .. tostring(ast) ..
         " with name: " .. tostring(ast.name))
@@ -772,12 +779,9 @@ do
 local _ENV = _ENV
 package.preload[ "compiler" ] = function( ... ) local arg = _G.arg;
 -- TODO
--- tab auto complete repl (linenoise/readline)
 -- basic syntax check
--- debuginfo level (assert)
 -- var names with dash
--- reveal word only after ;
--- don't sanitize methods
+-- don't sanitize methods (.:)
 -- : mod.my-method error while : my-word works
 
 local macros = require("macros")
@@ -785,28 +789,31 @@ local Dict = require("dict")
 local Parser = require("parser")
 local LineMapping = require("line_mapping")
 local Output = require("output")
+local Source = require("source")
 local Env = require("env")
 local interop = require("interop")
 local ast = require("ast")
 local utils = require("utils")
 
 local Compiler = {}
+local marker = "<<equinox:"
 
-function Compiler.new(codegen, optimizer)
+function Compiler:new(codegen, optimizer)
   local obj = {
     parser = nil,
+    source = Source:empty(),
     output = nil,
+    chunks = {},
     code_start = 1,
-    line_mapping = nil,
+    line_mapping = LineMapping:new(),
     env = nil,
-    root_env = Env.new(nil, "root"),
+    root_env = Env:new(nil, "root"),
     state = {},
     optimizer = codegen,
     codegen = optimizer,
-    chunk_name = "<<compiled eqx code>>",
-    dict = Dict.new()
+    dict = Dict:new()
   }
-  setmetatable(obj, {__index = Compiler})
+  setmetatable(obj, {__index = self})
   obj.root_env:def_var_unsafe("true", "true")
   obj.root_env:def_var_unsafe("false", "false")
   obj.root_env:def_var_unsafe("nil", "NIL")
@@ -819,20 +826,23 @@ function Compiler:reset_state()
   self.state = {sequence = 1, do_loop_nesting = 1, last_word = nil}
 end
 
-function Compiler:init(text)
-  self.parser = Parser.new(text)
-  self.output = Output.new(self.chunk_name)
-  self.line_mapping = LineMapping.new()
+function Compiler:init(source)
+  self.source = source
+  self.parser = Parser:new(source.text)
+  self.output = Output:new(marker .. self.source.name .. ">>")
   self.output:append("local stack = require(\"stack\")")
   self.output:new_line()
   self.output:append("local aux = require(\"aux\")")
   self.output:new_line()
   self.ast = {}
   self.code_start = self.output:size()
+  if self.source.type == "chunk" then
+    self.chunks[self.source.name] = self.source
+  end
 end
 
 function Compiler:new_env(name)
-  self.env = Env.new(self.env, name)
+  self.env = Env:new(self.env, name)
 end
 
 function Compiler:remove_env(name)
@@ -859,7 +869,12 @@ function Compiler:has_var(name)
 end
 
 function Compiler:word()
-  return self:next_item().token
+  local item = self:next_item()
+  if item then
+    return item.token
+  else
+    return nil
+  end
 end
 
 function Compiler:next_item()
@@ -868,6 +883,10 @@ end
 
 function Compiler:find(forth_name)
   return self.dict:find(forth_name)
+end
+
+function Compiler:reveal(lua_name)
+  self.dict:reveal(lua_name)
 end
 
 function Compiler:next_chr()
@@ -886,8 +905,18 @@ function Compiler:alias(lua_name, forth_alias)
   return self.dict:def_lua_alias(lua_name, forth_alias)
 end
 
-function Compiler:def_word(alias, name, immediate)
-  self.dict:def_word(alias, name, immediate)
+function Compiler:def_word(alias, name, immediate, hidden)
+  self.dict:def_word(alias, name, immediate, hidden)
+end
+
+function Compiler:err(message, item)
+  self.source:show_lines(item.line_number, 1)
+  self:reset_state()
+  error(message .. " at line: " .. item.line_number)
+end
+
+function Compiler:warn(message, item)
+  print("[WARN] " .. message .. " at line: " .. item.line_number)
 end
 
 function Compiler:exec_macro(item)
@@ -895,7 +924,7 @@ function Compiler:exec_macro(item)
   if mod == "macros" and type(macros[fun]) == "function" then
     return macros[fun](self, item)
   else
-    error("Unknown macro: " .. item.token .. " at line: " .. item.line_number)
+    self:err("Unknown macro: " .. item.token, item)
   end
 end
 
@@ -909,6 +938,10 @@ function Compiler:add_ast_nodes(nodes, item)
     nodes.forth_line_number = item.line_number
     table.insert(self.ast, nodes) -- single node
   end
+end
+
+function Compiler:valid_ref(name)
+  return self.env:has_var(name) or interop.resolve_lua_obj(name)
 end
 
 function Compiler:compile_token(item)
@@ -936,19 +969,20 @@ function Compiler:compile_token(item)
     if word then -- Regular Forth word
       return ast.func_call(word.lua_name)
     end
-    if interop.is_mixed_lua_expression(item.token) then
+    if interop.dot_or_colon_notation(item.token) then
       -- Table lookup: math.pi or tbl.key or method call a:b a:b.c
       local parts = interop.explode(item.token)
       local name = parts[1]
-      if self.env:has_var(name) or
-              interop.resolve_lua_obj(name)
-      then
+      if self:valid_ref(name) then
         -- This can result multiple values, like img:getDimensions,
-        -- a single value like tbl.key or str:upper, or nothing like img:draw
-        -- TODO if only tbl, than use push instead of push many as it must be faster
-        return ast.push_many(ast.identifier(interop.join(parts)))
+        -- a single value like tbl.key or str:upper, or void like img:draw
+        if interop.is_lua_prop_lookup(item.token) then
+          return ast.push(ast.identifier(interop.join(parts)))
+        else
+          return ast.push_many(ast.identifier(interop.join(parts)))
+        end
       else
-        error("Unkown variable: " .. name .. " at: " .. item.token)
+        self:err("Unkown variable: " .. name .. " in expression: " .. item.token, item)
       end
     end
     if interop.resolve_lua_obj(item.token) then
@@ -956,11 +990,11 @@ function Compiler:compile_token(item)
       return ast.push(ast.identifier(item.token))
     end
   end
-  error("Unknown token: " .. item.token .. " kind: " .. item.kind)
+  self:err("Unknown token: " .. item.token .. " kind: " .. item.kind, item)
 end
 
-function Compiler:compile(text)
-  self:init(text)
+function Compiler:compile(source)
+  self:init(source)
   local item = self.parser:next_item()
   while item do
     local node = self:compile_token(item)
@@ -975,72 +1009,86 @@ function Compiler:generate_code()
   for i, ast in ipairs(self.ast) do
     local code = self.codegen:gen(ast)
     if ast.forth_line_number then
-      self.line_mapping:set_target_source(
+      self.line_mapping:map_target_to_source(
+        self.source.name,
         ast.forth_line_number,
         self.output.line_number)
     end
+    if ast.name == "func_header" then
+      local word = self.dict:find_by_lua_name(ast.func_name)
+      -- methods are not stored in dict
+      if word then word.line_number = self.output.line_number end
+    end
     self.output:append(code)
     self.output:new_line()
+    if ast.name == "end_func" then
+      local word = self.dict:find_by_lua_name(ast.func_name)
+      if word then -- methods are not stored in dict
+        word.code = string.gsub(
+          self.output:text(word.line_number), "[\n\r]+$", "")
+      end
+    end
   end
   return self.output
 end
 
 function Compiler:error_handler(err)
-  local info = debug.getinfo(3, "lS")
-  if info and info.source ~= self.chunk_name then
-    info = debug.getinfo(4, "lS") -- if it was error/1
-  end
-  if info and info.currentline > 0 then
-    local src_line_num =
-      self.line_mapping:resolve_target(info.currentline)
-    if src_line_num then
-      print(string.format(
-              "Error occurred at line: %d", src_line_num))
-      for i = src_line_num -2, src_line_num +2 do
-        local line = self.parser.lines[i]
-        if line then
-          local mark = "  "
-          if i == src_line_num then mark = "=>" end
-          print(string.format("%s%03d.  %s", mark, i , line))
+  local info
+  local file = "N/A"
+  for level = 1, math.huge do
+    info = debug.getinfo(level, "Sl")
+    if not info then
+      break
+    end
+    if info.source and
+       info.currentline > 0 and
+       info.source:sub(1, #marker) == marker
+    then
+      file = info.source:match(marker .. "(.-)>>")
+      local src_line_num =
+        self.line_mapping:resolve_target(file, info.currentline)
+      if src_line_num then
+        io.stderr:write(string.format(
+                "  File \"%s\", line %d (%d)\n", file, src_line_num, info.currentline))
+        if utils.exists(file) then
+          Source:from_file(file):show_lines(src_line_num, 1)
+        elseif self.chunks[file] then
+          self.chunks[file]:show_lines(src_line_num, 1)
         end
       end
-      print()
     end
-    print(string.format("Original Error: %d", info.currentline))
   end
   return err
 end
 
-function Compiler:eval(text, log_result)
-  local code, err = self:compile_and_load(text, log_result)
-  if err then
-    self:error_handler(err) -- error during load
-    return error(err)
-  end
-  local success, result = xpcall(code, function(e) self:error_handler(e) end)
-  if success then
-    return result
-  else
-    error(result) -- error during execute
-  end
+function Compiler:eval_file(path, log_result)
+  return self:_eval(Source:from_file(path), log_result)
 end
 
-function Compiler:compile_and_load(text, log_result)
-  local out = self:compile(text)
+function Compiler:eval_text(text, log_result)
+  return self:_eval(Source:from_text(text), log_result)
+end
+
+function Compiler:compile_and_load(source, log_result) -- used by REPL for multiline
+  local out = self:compile(source)
   if log_result then
     io.write(self.output:text(self.code_start))
   end
   return out:load()
 end
 
-function Compiler:eval_file(path, log_result)
-  local file = io.open(path, "r")
-  if not file then
-    error("Could not open file: " .. path)
+function Compiler:_eval(source, log_result)
+  local code, err = self:compile_and_load(source, log_result, path)
+  if err then
+    self:error_handler(err) -- error during load
+    error(err)
   end
-  local content = file:read("*a")
-  file:close()
-  return self:eval(content, log_result)
+  local success, result = xpcall(code, function(e) return self:error_handler(e) end)
+  if success then
+    return result
+  else
+    error(result) -- error during execute
+  end
 end
 
 return Compiler
@@ -1054,61 +1102,78 @@ local interop = require("interop")
 
 local Dict = {}
 
-function Dict.new()
+function Dict:new()
   local obj = {words = {}}
-  setmetatable(obj, {__index = Dict})
+  setmetatable(obj, {__index = self})
   obj:init()
   return obj
 end
 
-local function entry(forth_name, lua_name, immediate, is_lua_alias)
+local function entry(forth_name, lua_name, immediate, is_lua_alias, hidden)
   return {
     forth_name = forth_name,
     lua_name = lua_name,
     immediate = immediate,
-    is_lua_alias = is_lua_alias
+    is_lua_alias = is_lua_alias,
+    hidden = hidden,
+    line_number = nil
   }
 end
 
-local function is_valid_lua_identifier(name)
-  local keywords = {
-      ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
-      ["end"] = true, ["false"] = true, ["for"] = true, ["function"] = true, ["goto"] = true,
-      ["if"] = true, ["in"] = true, ["local"] = true, ["nil"] = true, ["not"] = true,
-      ["or"] = true, ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
-      ["until"] = true, ["while"] = true }
-  if keywords[name] then
-      return false
-  end
-  return name:match("^[a-zA-Z_][a-zA-Z0-9_]*$") ~= nil
-end
-
-function Dict:def_word(forth_name, lua_name, immediate)
-  table.insert(self.words, entry(forth_name, lua_name, immediate, false))
+function Dict:def_word(forth_name, lua_name, immediate, hidden)
+  table.insert(self.words,
+               entry(forth_name, lua_name, immediate, false, hidden))
 end
 
 function Dict:def_macro(forth_name, lua_name)
-  self:def_word(forth_name, lua_name, true)
+  self:def_word(forth_name, lua_name, true, false)
 end
 
 function Dict:def_lua_alias(lua_name, forth_name)
-  table.insert(self.words, entry(forth_name, lua_name, immediate, true))
+  table.insert(self.words,
+               entry(forth_name, lua_name, immediate, true, false))
 end
 
-function Dict:find(forth_name)
+function Dict:find(name)
+  return self:find_by(
+    function (item)
+      return item.forth_name == name
+    end)
+end
+
+function Dict:find_by_lua_name(name)
+  return self:find_by(
+    function (item)
+      return item.lua_name == name
+    end)
+end
+
+function Dict:find_by(pred)
   for i = #self.words, 1, -1 do
     local each = self.words[i]
-    if each.forth_name == forth_name then
+    if not each.hidden and pred(each) then
       return each
     end
   end
   return nil
 end
 
+function Dict:reveal(name)
+  for i = #self.words, 1, -1 do
+    local each = self.words[i]
+    if each.lua_name == name then
+      each.hidden = false
+      return
+    end
+  end
+end
+
 function Dict:word_list()
   local result, seen = {}, {}
   for i, each in ipairs(self.words) do
-    if not seen[each.forth_name] then
+    if not seen[each.forth_name] and
+       not each.hidden
+    then
       if each.is_lua_alias or
          each.immediate or
          interop.resolve_lua_func(each.lua_name)
@@ -1191,12 +1256,14 @@ function Dict:init()
   self:def_macro(":", "macros.colon")
   self:def_macro("::", "macros.local_colon")
   self:def_macro(";", "macros.end_word")
+  self:def_macro("reveal", "macros.reveal")
   self:def_macro("exec", "macros.exec")
   self:def_macro("'", "macros.tick")
   self:def_macro("$", "macros.keyval")
   self:def_macro("(:", "macros.formal_params")
   self:def_macro("block", "macros.block")
   self:def_macro("end", "macros._end")
+  self:def_macro("see", "macros.see")
 end
 
 return Dict
@@ -1206,27 +1273,16 @@ end
 do
 local _ENV = _ENV
 package.preload[ "env" ] = function( ... ) local arg = _G.arg;
+local interop = require("interop")
+
 local Env = {}
 
-function Env.new(parent, name)
+function Env:new(parent, name)
   local obj = {parent = parent,
                name = name,
                vars = {}}
-  setmetatable(obj, {__index = Env})
+  setmetatable(obj, {__index = self})
   return obj
-end
-
-local function is_valid_lua_identifier(name)
-  local keywords = {
-      ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
-      ["end"] = true, ["false"] = true, ["for"] = true, ["function"] = true, ["goto"] = true,
-      ["if"] = true, ["in"] = true, ["local"] = true, ["nil"] = true, ["not"] = true,
-      ["or"] = true, ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
-      ["until"] = true, ["while"] = true }
-  if keywords[name] then
-    return false
-  end
-  return name:match("^[a-zA-Z_][a-zA-Z0-9_]*$") ~= nil
 end
 
 function Env:def_var_unsafe(forth_name, lua_name)
@@ -1235,7 +1291,7 @@ function Env:def_var_unsafe(forth_name, lua_name)
 end
 
 function Env:def_var(name)
-  if is_valid_lua_identifier(name) then
+  if interop.is_valid_lua_identifier(name) then
     self:def_var_unsafe(name, name)
   else
     error(name .. " is not a valid variable name. Avoid reserved keywords and special characters.")
@@ -1307,14 +1363,25 @@ function interop.join(parts)
   return exp
 end
 
-function interop.is_mixed_lua_expression(token)
-  return string.match(token, ".+[.:].+") and
-    not string.match(token, "([/~]%d*)$")
+function interop.is_lua_prop_lookup(token)
+  return token:sub(2, #token -1):find("[.]")
 end
 
-function interop.is_lua_prop_lookup(token)
-  return string.match(token, ".+%..+") and
-    not string.match(token, "([/~]%d*)$")
+function interop.dot_or_colon_notation(token)
+  return token:sub(2, #token -1):find("[.:]")
+end
+
+function interop.is_valid_lua_identifier(name)
+  local keywords = {
+      ["and"] = true, ["break"] = true, ["do"] = true, ["else"] = true, ["elseif"] = true,
+      ["end"] = true, ["false"] = true, ["for"] = true, ["function"] = true, ["goto"] = true,
+      ["if"] = true, ["in"] = true, ["local"] = true, ["nil"] = true, ["not"] = true,
+      ["or"] = true, ["repeat"] = true, ["return"] = true, ["then"] = true, ["true"] = true,
+      ["until"] = true, ["while"] = true }
+  if keywords[name] then
+      return false
+  end
+  return name:match("^[a-zA-Z_][a-zA-Z0-9_]*$") ~= nil
 end
 
 return interop
@@ -1326,23 +1393,28 @@ local _ENV = _ENV
 package.preload[ "line_mapping" ] = function( ... ) local arg = _G.arg;
 local LineMapping = {}
 
-function LineMapping.new(name)
+function LineMapping:new()
   local obj = {
-    name = name,
-    target_source = {},
+    mapping = {},
   }
-  setmetatable(obj, {__index = LineMapping})
+  setmetatable(obj, {__index = self})
   return obj
 end
 
-function LineMapping:set_target_source(source_line_num, target_line_num)
-  self.target_source[target_line_num] = source_line_num
+function LineMapping:map_target_to_source(tag, source_line_num, target_line_num)
+  if not self.mapping[tag] then
+    self.mapping[tag] = {}
+  end
+  self.mapping[tag][target_line_num] = source_line_num
 end
 
-function LineMapping:resolve_target(target_line_num)
-  return self.target_source[target_line_num]
+function LineMapping:resolve_target(tag, target_line_num)
+  local mapping = self.mapping[tag]
+  if mapping then
+    return mapping[target_line_num]
+  end
+  return nil
 end
-
 
 return LineMapping
 end
@@ -1387,17 +1459,12 @@ local function sanitize(str)
   if str:match("^%d+") then
     str = "_" .. str
   end
-  if str:match("^%.") then
-    str = "dot_" .. str:sub(2)
-  end
-  if str:match("^%:") then
-    str = "col_" .. str:sub(2) -- TODO check
-  end
+  -- . and : are only allowed at the beginning or end
+  if str:match("^%.") then str = "dot_" .. str:sub(2) end
+  if str:match("^%:") then str = "col_" .. str:sub(2) end
+  if str:match("%.$") then str = str:sub(1, #str -1) .. "_dot" end
+  if str:match("%:$") then str = str:sub(1, #str -1) .. "_col" end
   return str
-end
-
-local function err(message, item) -- TODO move to comp
-  error(message .. " at line: " .. item.line_number)
 end
 
 function macros.add()
@@ -1551,26 +1618,42 @@ end
 
 local function def_word(compiler, is_global, item)
   local forth_name = compiler:word()
+  if not forth_name then
+    compiler:err("Missing name for colon definition.", item)
+  end
   local lua_name = sanitize(forth_name)
-  if not forth_name:find("[.:]") and compiler:find(forth_name) then
+  if select(2, forth_name:gsub("%:", "")) > 1 or
+     select(2, forth_name:gsub("%.", "")) > 1
+  then
+    compiler:err("Name " .. forth_name ..
+                 " can't contain multiple . or : characters.", item)
+  end
+  if interop.dot_or_colon_notation(forth_name) then -- method syntax
+    local parts = interop.explode(forth_name)
+    local obj = parts[1]
+    local method = parts[3] -- parts[2] is expected to be . or :
+    if not interop.is_valid_lua_identifier(method) then
+      compiler:err("Name " .. method .. " is not a valid name for dot or colon notation.", item)
+    end
+    if not compiler:has_var(obj) then
+      compiler:warn("Unknown object: " .. tostring(obj) ..
+          " in method definition: " .. forth_name, item)
+    end
+    if forth_name:find(":") then
+      compiler:def_var("self")
+    end
+  elseif compiler:find(forth_name) then -- Regular Forth word
     -- emulate hyper static glob env for funcs but not for methods
     lua_name = lua_name .. "__s" .. compiler.state.sequence
     compiler.state.sequence = compiler.state.sequence + 1
   end
-  compiler:new_env("colon_" .. lua_name)
-  compiler:def_word(forth_name, lua_name, false)
-  if forth_name:find(":") then
-    local obj = forth_name:match("([^:]+)")
-    if obj and compiler:has_var(obj) then
-      compiler:def_var("self")
-    else
-      err("Undefined object: " .. tostring(obj) ..
-          " in method definition: " .. forth_name, item)
-    end
+  if not interop.dot_or_colon_notation(forth_name) then
+    compiler:def_word(forth_name, lua_name, false, true)
   end
+  compiler:new_env("colon_" .. lua_name)
   local header = ast.func_header(lua_name, is_global)
   if compiler.state.last_word then
-    err("Word definitions cannot be nested", item)
+    compiler:err("Word definitions cannot be nested", item)
   else
     compiler.state.last_word = header
   end
@@ -1589,11 +1672,11 @@ function macros.tick(compiler, item)
   local name = compiler:word()
   local word = compiler:find(name)
   if not word then
-    err(name .. " is not found in dictionary", item)
+    compiler:err(name .. " is not found in dictionary", item)
   elseif word.immediate then
-    err("' cannot be used on a macro: " .. name, item)
+    compiler:err("' cannot be used on a macro: " .. name, item)
   elseif word.is_lua_alias then
-    err("' cannot be used on an alias: " .. name, item)
+    compiler:err("' cannot be used on an alias: " .. name, item)
   end
   return ast.push(ast.identifier(word.lua_name))
 end
@@ -1621,25 +1704,36 @@ function macros.single_line_comment(compiler)
   end
 end
 
+local function is_valid_exp(exp, compiler)
+  local name = exp
+  if interop.dot_or_colon_notation(exp) then
+    name = interop.explode(exp)[1]
+  end
+  return compiler:valid_ref(name) or compiler:find(name)
+end
+
 function macros.arity_call_lua(compiler, item)
-  local func  = compiler:word() -- TODO resolve func name
-  local numret = 1
+  local func  = compiler:word()
+  if not is_valid_exp(func, compiler) then
+    compiler:err("Unkown function or word: " .. func, item)
+  end
+  local numret = -1
   local arity = 0
   local token = compiler:word()
   if token ~= ")" then
     arity = tonumber(token)
     if not arity or arity < 0 then
-      err("expected arity number, got " .. token, item)
+      compiler:err("expected arity number, got " .. tostring(token), item)
     end
     token = compiler:word()
     if token ~= ")" then
       numret = tonumber(token)
-      if not numret or numret < 0 then
-        err("expected number of return values, got " .. token, item)
+      if not numret or numret < -1 or numret > 1 then
+        compiler:err("expected number of return values (0/1/-1), got " .. tostring(token), item)
       end
       token = compiler:word()
       if token ~= ")" then
-        err("expected closing ), got " .. token, item)
+        compiler:err("expected closing ), got " .. tostring(token), item)
       end
     end
   end
@@ -1655,11 +1749,16 @@ function macros.arity_call_lua(compiler, item)
         ast.init_local(params[i].id, ast.pop()))
     end
   end
-  if numret == 0 then -- TODO support > 1
+  if numret == 0 then
     table.insert(stmts, ast.func_call(func, unpack(params)))
-  else
+  elseif numret == 1 then
+    table.insert(stmts, ast.push(
+                   ast.func_call(func, unpack(params))))
+  elseif numret == -1 then
     table.insert(stmts, ast.push_many(
                    ast.func_call(func, unpack(params))))
+  else
+    compiler:err("Invalid numret:" .. tostring(numret), item)
   end
   return stmts
 end
@@ -1704,7 +1803,7 @@ function macros.assignment(compiler, item)
     then
       return ast.assignment(name, ast.pop())
     else
-      err("Undeclared variable: " .. name, item)
+      compiler:err("Undeclared variable: " .. name, item)
     end
   end
 end
@@ -1829,10 +1928,28 @@ end
 
 function macros.end_word(compiler, item)
   if not compiler.state.last_word then
-    err("Unexpected semicolon", item)
+    compiler:err("Unexpected semicolon", item)
   end
+  local name = compiler.state.last_word.func_name
+  macros.reveal(compiler, item)
   compiler.state.last_word = nil
-  return macros._end(compiler)
+  compiler:remove_env()
+  return ast.end_func(name)
+end
+
+function macros.see(compiler, item)
+  local name = compiler:word()
+  if not name then return end
+  local word = compiler:find(name)
+  if not word then
+    compiler:err(name .. " is not found in dictionary", item)
+  elseif word.immediate then
+    print("N/A. Macro (immediate word)")
+  elseif word.is_lua_alias then
+    print("N/A. Alias")
+  else
+    print(word.code)
+  end
 end
 
 function macros.keyval(compiler)
@@ -1845,7 +1962,7 @@ end
 
 function macros.formal_params(compiler, item)
   if not compiler.state.last_word then
-    err("Unexpected (:", item)
+    compiler:err("Unexpected (:", item)
   end
   local func_header = compiler.state.last_word
   local param_name = compiler:word()
@@ -1855,6 +1972,13 @@ function macros.formal_params(compiler, item)
     param_name = compiler:word()
   end
   return result
+end
+
+function macros.reveal(compiler, item)
+  if not compiler.state.last_word then
+    compiler:err("Reveal must be used within a word definition.", item)
+  end
+  compiler:reveal(compiler.state.last_word.func_name)
 end
 
 function macros.words(compiler)
@@ -1873,9 +1997,9 @@ local _ENV = _ENV
 package.preload[ "output" ] = function( ... ) local arg = _G.arg;
 local Output = {}
 
-function Output.new(name)
+function Output:new(name)
   local obj = {lines = {""}, line_number = 1, name = name}
-  setmetatable(obj, {__index = Output})
+  setmetatable(obj, {__index = self})
   return obj
 end
 
@@ -1916,20 +2040,11 @@ local interop = require("interop")
 
 local Parser = {}
 
-local function lines_of(input)
-  local lines = {}
-  for line in input:gmatch("([^\r\n]*)\r?\n?") do
-    table.insert(lines, line)
-  end
-  return lines
-end
-
-function Parser.new(source)
+function Parser:new(source)
   local obj = {index = 1,
                line_number = 1,
-               source = source,
-               lines = lines_of(source)}
-  setmetatable(obj, {__index = Parser})
+               source = source}
+  setmetatable(obj, {__index = self})
   return obj
 end
 
@@ -2033,6 +2148,7 @@ do
 local _ENV = _ENV
 package.preload[ "repl" ] = function( ... ) local arg = _G.arg;
 local stack = require("stack")
+local Source = require("source")
 
 local SINGLE_LINE = 1
 local MULTI_LINE = 2
@@ -2072,7 +2188,7 @@ local function extension(filename)
   return filename:match("^.+(%.[^%.]+)$")
 end
 
-function Repl.new(compiler, optimizer)
+function Repl:new(compiler, optimizer)
   local obj = {compiler = compiler,
                optimizer = optimizer,
                mode = SINGLE_LINE,
@@ -2080,7 +2196,7 @@ function Repl.new(compiler, optimizer)
                repl_ext_loaded = false,
                input = "",
                log_result = false }
-  setmetatable(obj, {__index = Repl})
+  setmetatable(obj, {__index = self})
   return obj
 end
 
@@ -2113,16 +2229,15 @@ math.randomseed(os.time())
 function Repl:welcome(version)
   print("Equinox Forth Console (" .. _VERSION .. ") @ Delta Quadrant.")
   print(messages[math.random(1, #messages)])
-  print("\27[1;96m")
+  io.write("\27[1;96m")
   print(string.format([[
- ___________________          _-_
- \__(==========/_=_/ ____.---'---`---.____
-             \_ \    \----._________.----/
-               \ \   /  /    `-_-'
-          ___,--`.`-'..'-_
-         /____          (|
-               `--.____,-'   v%s
-]], version))
+ __________________          _-_
+ \__(=========/_=_/ ____.---'---`---.___
+            \_ \    \----._________.---/
+              \ \   /  /    `-_-'
+         ___,--`.`-'..'-_
+        /____          (|
+              `--.____,-'   v%s]], version))
   print("\27[0m")
   print("Type 'words' for wordlist, 'bye' to exit or 'help'.")
   print("First time Forth user? Type: load-file tutorial")
@@ -2232,7 +2347,7 @@ function Repl:print_ok()
   if stack:depth() > 0 then
     print("\27[92m" .. "OK(".. stack:depth()  .. ")" .. "\27[0m")
     if self.always_show_stack and self.repl_ext_loaded then
-      self.compiler:eval(".s")
+      self.compiler:eval_text(".s")
     end
   else
     print("\27[92mOK\27[0m")
@@ -2260,7 +2375,8 @@ function Repl:start()
     self:read()
     if not self:process_commands() then
       local success, result = pcall(function ()
-          return self.compiler:compile_and_load(self.input, self.log_result)
+          return self.compiler:compile_and_load(
+            Source:from_text(self.input), self.log_result)
       end)
       if not success then
         self:print_err(result)
@@ -2281,9 +2397,75 @@ end
 
 do
 local _ENV = _ENV
+package.preload[ "source" ] = function( ... ) local arg = _G.arg;
+local Source = {}
+
+local seq = 1
+
+local function lines_of(input)
+  local lines = {}
+  for line in input:gmatch("([^\r\n]*)\r?\n?") do
+    table.insert(lines, line)
+  end
+  return lines
+end
+
+function Source:new(text, path)
+  local obj = {text = text,
+               path = path,
+               name = nil,
+               type = nil,
+               lines = lines_of(text)}
+  setmetatable(obj, {__index = self})
+  if path then
+    obj.name = path
+    obj.type = "file"
+  else
+    obj.name = "chunk" .. seq
+    seq = seq + 1
+    obj.type = "chunk"
+  end
+  return obj
+end
+
+function Source:from_text(text)
+  return self:new(text, nil)
+end
+
+function Source:empty()
+  return self:from_text("")
+end
+
+function Source:from_file(path)
+  local file = io.open(path, "r")
+  if not file then
+    error("Could not open file: " .. path)
+  end
+  local src = self:new(file:read("*a"), path)
+  file:close()
+  return src
+end
+
+function Source:show_lines(src_line_num, n)
+  for i = src_line_num - n, src_line_num + n do
+    local line = self.lines[i]
+    if line then
+      local mark = "  "
+      if i == src_line_num then mark = "=>" end
+      io.stderr:write(string.format("    %s%03d.  %s\n", mark, i , line))
+    end
+  end
+end
+
+return Source
+end
+end
+
+do
+local _ENV = _ENV
 package.preload[ "stack" ] = function( ... ) local arg = _G.arg;
 local Stack = require("stack_def")
-local stack = Stack.new("data-stack")
+local stack = Stack:new("data-stack")
 
 return stack
 end
@@ -2295,10 +2477,10 @@ package.preload[ "stack_def" ] = function( ... ) local arg = _G.arg;
 local Stack = {}
 local NIL = {} -- nil cannot be stored in table, use this placeholder
 
-function Stack.new(name)
+function Stack:new(name)
   local obj = {stack = {nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil},
                name = name}
-  setmetatable(obj, {__index = Stack})
+  setmetatable(obj, {__index = self})
   return obj
 end
 
@@ -2496,11 +2678,21 @@ function utils.deepcopy(orig)
   return copy
 end
 
+function utils.exists(filename)
+  local file = io.open(filename, "r")
+  if file then
+    file:close()
+    return true
+  else
+    return false
+  end
+end
+
 return utils
 end
 end
 
-__VERSION__="0.0.1815"
+__VERSION__="0.0.2018"
 
 local Compiler = require("compiler")
 local Optimizer = require("ast_optimizer")
@@ -2508,9 +2700,9 @@ local CodeGen = require("codegen")
 local Repl = require("repl")
 
 local equinox = {}
-local optimizer = Optimizer.new()
-local compiler = Compiler.new(optimizer, CodeGen.new())
-local repl = Repl.new(compiler, optimizer)
+local optimizer = Optimizer:new()
+local compiler = Compiler:new(optimizer, CodeGen:new())
+local repl = Repl:new(compiler, optimizer)
 
 local lua_require = require
 
@@ -2526,14 +2718,13 @@ local lib = [[
 alias: append #( table.insert 2 0 )
 alias: insert #( table.insert 3 0 )
 alias: remove #( table.remove 2 0 )
-alias: >str #( tostring 1 )
-alias: need #( require 1 )
-alias: type #( type 1 )
-alias: max  #( math.max 2 )
-alias: min  #( math.min 2 )
-
-\ TODO
-\ alias: assert-true >p assert 1
+alias: >str #( tostring 1 1 )
+alias: >num #( tonumber 1 1 )
+alias: need #( require 1 1 )
+alias: type #( type 1 1 )
+alias: max  #( math.max 2 1 )
+alias: min  #( math.min 2 1 )
+alias: # size
 
 : assert-true #( assert 1 0 ) ;
 : assert-false not assert-true ;
@@ -2588,7 +2779,7 @@ function equinox.eval_files(files, log_result)
 end
 
 function equinox.init()
-  compiler:eval(lib)
+  compiler:eval_text(lib)
 end
 
 function equinox.main()
@@ -2619,8 +2810,8 @@ function equinox.main()
   end
 end
 
-function equinox.eval(str, log_result)
-  return compiler:eval(str, log_result)
+function equinox.eval_text(str, log_result)
+  return compiler:eval_text(str, log_result)
 end
 
 function equinox.eval_file(str, log_result)

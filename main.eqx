@@ -40,7 +40,7 @@ var state
 
 : reset-timer 0 -> time ;
 
-: len  ( -- n ) snake size ;
+: len  ( -- n ) snake # ;
 : head ( -- p ) snake len @ ;
 : cut snake 1 remove ;
 
