@@ -1,6 +1,8 @@
 local equinox = require("equinox_bundle")
 equinox.init()
 
+debug.traceback = equinox.traceback
+
 table.insert(package.loaders, function(filename)
    if love.filesystem.getInfo(filename) then
       print("Loading: " .. filename);

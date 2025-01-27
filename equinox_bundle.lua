@@ -778,12 +778,6 @@ end
 do
 local _ENV = _ENV
 package.preload[ "compiler" ] = function( ... ) local arg = _G.arg;
--- TODO
--- basic syntax check
--- var names with dash
--- don't sanitize methods (.:)
--- : mod.my-method error while : my-word works
-
 local macros = require("macros")
 local Dict = require("dict")
 local Parser = require("parser")
@@ -845,9 +839,9 @@ function Compiler:new_env(name)
   self.env = Env:new(self.env, name)
 end
 
-function Compiler:remove_env(name)
+function Compiler:remove_env(name, item)
   if name and self.env.name ~= name then
-    error("Incorrect nesting: " .. name)
+    self:err("Incorrect nesting: " .. name, item)
   end
   if self.env.parent then
     self.env = self.env.parent
@@ -857,15 +851,19 @@ function Compiler:remove_env(name)
 end
 
 function Compiler:def_var(name)
-  self.env:def_var(name)
+  return self.env:def_var(name)
 end
 
 function Compiler:def_global(name)
-  self.root_env:def_var(name)
+  return self.root_env:def_var(name)
 end
 
 function Compiler:has_var(name)
   return self.env:has_var(name)
+end
+
+function Compiler:find_var(name)
+  return self.env:find_var(name)
 end
 
 function Compiler:word()
@@ -964,7 +962,8 @@ function Compiler:compile_token(item)
       return utils.deepcopy(word.lua_name)
     end
     if self.env:has_var(item.token) then -- Forth variable
-      return ast.push(ast.identifier(item.token))
+      return ast.push(
+        ast.identifier(self.env:find_var(item.token).lua_name))
     end
     if word then -- Regular Forth word
       return ast.func_call(word.lua_name)
@@ -974,6 +973,9 @@ function Compiler:compile_token(item)
       local parts = interop.explode(item.token)
       local name = parts[1]
       if self:valid_ref(name) then
+        if self.env:has_var(name) then
+          parts[1] = self.env:find_var(name).lua_name
+        end
         -- This can result multiple values, like img:getDimensions,
         -- a single value like tbl.key or str:upper, or void like img:draw
         if interop.is_lua_prop_lookup(item.token) then
@@ -1032,7 +1034,7 @@ function Compiler:generate_code()
   return self.output
 end
 
-function Compiler:error_handler(err)
+function Compiler:traceback(err)
   local info
   local file = "N/A"
   for level = 1, math.huge do
@@ -1080,10 +1082,10 @@ end
 function Compiler:_eval(source, log_result)
   local code, err = self:compile_and_load(source, log_result, path)
   if err then
-    self:error_handler(err) -- error during load
+    self:traceback(err) -- error during load
     error(err)
   end
-  local success, result = xpcall(code, function(e) return self:error_handler(e) end)
+  local success, result = xpcall(code, function(e) return self:traceback(e) end)
   if success then
     return result
   else
@@ -1221,9 +1223,7 @@ function Dict:init()
   self:def_macro("{}", "macros.new_table")
   self:def_macro("[]", "macros.new_table")
   self:def_macro("size", "macros.table_size")
-  self:def_macro("at", "macros.table_at")
   self:def_macro("@", "macros.table_at")
-  self:def_macro("put", "macros.table_put")
   self:def_macro("!", "macros.table_put")
   self:def_macro("words", "macros.words")
   self:def_macro("exit", "macros._exit")
@@ -1234,8 +1234,8 @@ function Dict:init()
   self:def_macro("begin", "macros._begin")
   self:def_macro("until", "macros._until")
   self:def_macro("while", "macros._while")
-  self:def_macro("repeat", "macros._end")
-  self:def_macro("again", "macros._end")
+  self:def_macro("repeat", "macros._repeat")
+  self:def_macro("again", "macros._again")
   self:def_macro("case", "macros._case")
   self:def_macro("of", "macros._of")
   self:def_macro("endof", "macros._endof")
@@ -1256,7 +1256,7 @@ function Dict:init()
   self:def_macro(":", "macros.colon")
   self:def_macro("::", "macros.local_colon")
   self:def_macro(";", "macros.end_word")
-  self:def_macro("reveal", "macros.reveal")
+  self:def_macro("recursive", "macros.reveal")
   self:def_macro("exec", "macros.exec")
   self:def_macro("'", "macros.tick")
   self:def_macro("$", "macros.keyval")
@@ -1291,20 +1291,22 @@ function Env:def_var_unsafe(forth_name, lua_name)
 end
 
 function Env:def_var(name)
-  if interop.is_valid_lua_identifier(name) then
-    self:def_var_unsafe(name, name)
-  else
-    error(name .. " is not a valid variable name. Avoid reserved keywords and special characters.")
-  end
+  local lua_name = interop.sanitize(name)
+  self:def_var_unsafe(name, lua_name)
+  return lua_name
 end
 
 function Env:has_var(forth_name)
+  return self:find_var(forth_name) ~= nil
+end
+
+function Env:find_var(forth_name)
   for i, each in ipairs(self.vars) do
     if each.forth_name == forth_name then
-      return true
+      return each
     end
   end
-  return self.parent and self.parent:has_var(forth_name)
+  return self.parent and self.parent:find_var(forth_name)
 end
 
 return Env
@@ -1384,6 +1386,45 @@ function interop.is_valid_lua_identifier(name)
   return name:match("^[a-zA-Z_][a-zA-Z0-9_]*$") ~= nil
 end
 
+function interop.sanitize(str)
+  str = str:gsub("-", "_mi_")
+    :gsub("%+", "_pu_")
+    :gsub("%%", "_pe_")
+    :gsub("/", "_fs_")
+    :gsub("\\", "_bs_")
+    :gsub("~", "_ti_")
+    :gsub("#", "_hs_")
+    :gsub("%*", "_sr_")
+    :gsub(";", "_sc_")
+    :gsub("&", "_an_")
+    :gsub("|", "_or_")
+    :gsub("@", "_at_")
+    :gsub("`", "_bt_")
+    :gsub("=", "_eq_")
+    :gsub("'", "_sq_")
+    :gsub('"', "_dq_")
+    :gsub("?", "_qe_")
+    :gsub("!", "_ex_")
+    :gsub(",", "_ca_")
+    :gsub("%>", "_gt_")
+    :gsub("%<", "_lt_")
+    :gsub("%{", "_c1_")
+    :gsub("%}", "_c2_")
+    :gsub("%[", "_b1_")
+    :gsub("%]", "_b2_")
+    :gsub("%(", "_p1_")
+    :gsub("%(", "_p2_")
+  if str:match("^%d+") then
+    str = "_" .. str
+  end
+  -- . and : are only allowed at the beginning or end
+  if str:match("^%.") then str = "dot_" .. str:sub(2) end
+  if str:match("^%:") then str = "col_" .. str:sub(2) end
+  if str:match("%.$") then str = str:sub(1, #str -1) .. "_dot" end
+  if str:match("%:$") then str = str:sub(1, #str -1) .. "_col" end
+  return str
+end
+
 return interop
 end
 end
@@ -1429,43 +1470,6 @@ local ast = require("ast")
 local unpack = table.unpack or unpack
 
 local macros = {}
-
-local function sanitize(str)
-  str = str:gsub("-", "_mi_")
-    :gsub("%+", "_pu_")
-    :gsub("%%", "_pe_")
-    :gsub("/", "_fs_")
-    :gsub("\\", "_bs_")
-    :gsub("~", "_ti_")
-    :gsub("#", "_hs_")
-    :gsub("%*", "_sr_")
-    :gsub(";", "_sc_")
-    :gsub("&", "_an_")
-    :gsub("|", "_or_")
-    :gsub("@", "_at_")
-    :gsub("`", "_bt_")
-    :gsub("=", "_eq_")
-    :gsub("'", "_sq_")
-    :gsub('"', "_dq_")
-    :gsub("?", "_qe_")
-    :gsub("!", "_ex_")
-    :gsub(",", "_ca_")
-    :gsub("%{", "_c1_")
-    :gsub("%}", "_c2_")
-    :gsub("%[", "_b1_")
-    :gsub("%]", "_b2_")
-    :gsub("%(", "_p1_")
-    :gsub("%(", "_p2_")
-  if str:match("^%d+") then
-    str = "_" .. str
-  end
-  -- . and : are only allowed at the beginning or end
-  if str:match("^%.") then str = "dot_" .. str:sub(2) end
-  if str:match("^%:") then str = "col_" .. str:sub(2) end
-  if str:match("%.$") then str = str:sub(1, #str -1) .. "_dot" end
-  if str:match("%:$") then str = str:sub(1, #str -1) .. "_col" end
-  return str
-end
 
 function macros.add()
   return ast.push(ast.bin_op("+", ast.pop(), ast.pop()))
@@ -1621,23 +1625,24 @@ local function def_word(compiler, is_global, item)
   if not forth_name then
     compiler:err("Missing name for colon definition.", item)
   end
-  local lua_name = sanitize(forth_name)
+  local lua_name = interop.sanitize(forth_name)
   if select(2, forth_name:gsub("%:", "")) > 1 or
      select(2, forth_name:gsub("%.", "")) > 1
   then
-    compiler:err("Name " .. forth_name ..
-                 " can't contain multiple . or : characters.", item)
+    compiler:err("Name '" .. forth_name .. "' " ..
+                 "can't contain multiple . or : characters.", item)
   end
   if interop.dot_or_colon_notation(forth_name) then -- method syntax
     local parts = interop.explode(forth_name)
     local obj = parts[1]
     local method = parts[3] -- parts[2] is expected to be . or :
     if not interop.is_valid_lua_identifier(method) then
-      compiler:err("Name " .. method .. " is not a valid name for dot or colon notation.", item)
+      compiler:err("Name '" .. method .. "' " ..
+                   "is not a valid name for dot or colon notation.", item)
     end
     if not compiler:has_var(obj) then
-      compiler:warn("Unknown object: " .. tostring(obj) ..
-          " in method definition: " .. forth_name, item)
+      compiler:warn("Unknown object: '" .. tostring(obj) .. "'" ..
+          "in method definition: " .. forth_name, item)
     end
     if forth_name:find(":") then
       compiler:def_var("self")
@@ -1763,16 +1768,22 @@ function macros.arity_call_lua(compiler, item)
   return stmts
 end
 
-function macros.var(compiler)
+function macros.var(compiler, item)
   local name = compiler:word()
-  compiler:def_var(name)
-  return ast.def_local(name)
+  if name then
+    return ast.def_local(compiler:def_var(name))
+  else
+    compiler:err("Missing variable name.", item)
+  end
 end
 
-function macros.var_global(compiler)
+function macros.var_global(compiler, item)
   local name = compiler:word()
-  compiler:def_global(name)
-  return ast.def_global(name)
+  if name then
+    return ast.def_global(compiler:def_global(name))
+  else
+    compiler:err("Missing variable name.", item)
+  end
 end
 
 local function valid_tbl_assignment(compiler, name)
@@ -1789,31 +1800,42 @@ function macros.assignment(compiler, item)
   if name == "var" then
     -- declare and assign of a new var
     name = compiler:word()
-    compiler:def_var(name)
-    return ast.init_local(name, ast.pop())
+    return ast.init_local(compiler:def_var(name), ast.pop())
   elseif name == "global" then
     -- declare and assign of a new global
     name = compiler:word()
-    compiler:def_global(name)
-    return ast.init_global(name, ast.pop())
+    return ast.init_global(compiler:def_global(name), ast.pop())
   else
     -- assignment of existing var
-    if compiler:has_var(name) or
-       valid_tbl_assignment(compiler, name) -- 123 -> tbl.x
-    then
-      return ast.assignment(name, ast.pop())
+    if compiler:has_var(name) then
+      return ast.assignment(
+        compiler:find_var(name).lua_name, ast.pop())
+    elseif valid_tbl_assignment(compiler, name) then -- 123 -> tbl.x
+      local parts = interop.explode(name)
+      if compiler:has_var(parts[1]) then
+        parts[1] = compiler:find_var(parts[1]).lua_name
+        return ast.assignment(interop.join(parts), ast.pop())
+      else
+        return ast.assignment(name, ast.pop())
+      end
     else
       compiler:err("Undeclared variable: " .. name, item)
     end
   end
 end
 
-function macros._if()
+function macros._if(compiler)
+  compiler:new_env('IF')
   return ast._if(ast.pop())
 end
 
 function macros._else()
   return ast.keyword("else")
+end
+
+function macros._then(compiler, item)
+  compiler:remove_env('IF', item)
+  return ast.keyword("end")
 end
 
 function macros._begin(compiler)
@@ -1822,8 +1844,18 @@ function macros._begin(compiler)
   return ast._while(ast.literal("boolean", "true"))
 end
 
-function macros._until(compiler)
-  compiler:remove_env('BEGIN_LOOP')
+function macros._again(compiler, item)
+  compiler:remove_env('BEGIN_LOOP', item)
+  return ast.keyword("end")
+end
+
+function macros._repeat(compiler, item)
+  compiler:remove_env('BEGIN_LOOP', item)
+  return ast.keyword("end")
+end
+
+function macros._until(compiler, item)
+  compiler:remove_env('BEGIN_LOOP', item)
   return {
     ast._if(ast.pop(), ast.keyword("break")),
     ast.keyword("end")
@@ -1839,11 +1871,13 @@ function macros._while()
   return ast._if(ast.unary_op("not", ast.pop()), ast.keyword("break"))
 end
 
-function macros._case() -- simulate goto with break, in pre lua5.2 since GOTO was not yet supported
+function macros._case(compiler) -- simulate goto with break, in pre lua5.2 since GOTO was not yet supported
+  compiler:new_env('CASE')
   return ast.keyword("repeat")
 end
 
-function macros._of()
+function macros._of(compiler)
+  compiler:new_env('OF')
   return {
     ast.stack_op("over"),
     ast._if(ast.bin_op("==", ast.pop(), ast.pop())),
@@ -1851,11 +1885,13 @@ function macros._of()
   }
 end
 
-function macros._endof() -- GOTO endcase
+function macros._endof(compiler, item) -- GOTO endcase
+  compiler:remove_env('OF', item)
   return { ast.keyword("break"), ast.keyword("end") }
 end
 
-function macros._endcase()
+function macros._endcase(compiler, item)
+  compiler:remove_env('CASE', item)
   return ast._until(ast.literal("boolean", "true"))
 end
 
@@ -1878,8 +1914,8 @@ function macros._do(compiler)
       nil)
 end
 
-function macros._loop(compiler)
-  compiler:remove_env('DO_LOOP')
+function macros._loop(compiler, item)
+  compiler:remove_env('DO_LOOP', item)
   compiler.state.do_loop_nesting =
     compiler.state.do_loop_nesting - 1
   return ast.keyword("end")
@@ -1917,12 +1953,8 @@ function macros._step(compiler)
   return ast._for(loop_var, ast.pop3rd(), ast.pop2nd(), ast.pop(), nil)
 end
 
-function macros._then(compiler)
-  return ast.keyword("end")
-end
-
 function macros._end(compiler)
-  compiler:remove_env()
+  compiler:remove_env() -- can belong to multiple
   return ast.keyword("end")
 end
 
@@ -2692,7 +2724,7 @@ return utils
 end
 end
 
-__VERSION__="0.0.2018"
+__VERSION__="0.0.2073"
 
 local Compiler = require("compiler")
 local Optimizer = require("ast_optimizer")
@@ -2748,7 +2780,7 @@ alias: # size
       "Table needs even number of items" #( error 1 )
     then
     2 / 0 do
-      dup >a -rot put a>
+      dup >a -rot ! a>
     loop ;
 ]]
 
@@ -2816,6 +2848,10 @@ end
 
 function equinox.eval_file(str, log_result)
   return compiler:eval_file(str, log_result)
+end
+
+equinox.traceback = function(err)
+  return compiler:traceback(err)
 end
 
 if arg and arg[0] and
