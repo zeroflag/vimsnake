@@ -610,16 +610,6 @@ end
 
 do
 local _ENV = _ENV
-package.preload[ "aux" ] = function( ... ) local arg = _G.arg;
-local Stack = require("stack_def")
-local aux = Stack:new("aux-stack")
-
-return aux
-end
-end
-
-do
-local _ENV = _ENV
 package.preload[ "codegen" ] = function( ... ) local arg = _G.arg;
 local CodeGen = {}
 
@@ -698,9 +688,15 @@ function CodeGen:gen(ast)
         self:gen(ast.step))
   end
   if "for_each" == ast.name then
+    if ast.loop_var1 and ast.loop_var2 then
       return string.format(
         "for %s,%s in %s do",
         ast.loop_var1, ast.loop_var2, self:gen(ast.iterable))
+    else
+      return string.format(
+        "for %s in %s do",
+        ast.loop_var1, self:gen(ast.iterable))
+    end
   end
   if "pairs" == ast.name then
     return string.format("pairs(%s)", self:gen(ast.iterable))
@@ -792,7 +788,7 @@ local utils = require("utils")
 local Compiler = {}
 local marker = "<<equinox:"
 
-function Compiler:new(codegen, optimizer)
+function Compiler:new(optimizer, codegen)
   local obj = {
     parser = nil,
     source = Source:empty(),
@@ -803,8 +799,8 @@ function Compiler:new(codegen, optimizer)
     env = nil,
     root_env = Env:new(nil, "root"),
     state = {},
-    optimizer = codegen,
-    codegen = optimizer,
+    optimizer = optimizer,
+    codegen = codegen,
     dict = Dict:new()
   }
   setmetatable(obj, {__index = self})
@@ -826,7 +822,7 @@ function Compiler:init(source)
   self.output = Output:new(marker .. self.source.name .. ">>")
   self.output:append("local stack = require(\"stack\")")
   self.output:new_line()
-  self.output:append("local aux = require(\"aux\")")
+  self.output:append("local aux = require(\"stack_aux\")")
   self.output:new_line()
   self.ast = {}
   self.code_start = self.output:size()
@@ -864,6 +860,10 @@ end
 
 function Compiler:find_var(name)
   return self.env:find_var(name)
+end
+
+function Compiler:var_names()
+  return self.env:var_names()
 end
 
 function Compiler:word()
@@ -1099,6 +1099,47 @@ end
 
 do
 local _ENV = _ENV
+package.preload[ "console" ] = function( ... ) local arg = _G.arg;
+local console = {}
+
+local is_windows = (os.getenv("OS") and string.find(os.getenv("OS"), "Windows"))
+  or package.config:sub(1,1) == '\\'
+
+console.RED    = "\27[91m"
+console.GREEN  = "\27[92m"
+console.CYAN   = "\27[1;96m"
+console.PURPLE = "\27[1;95m"
+console.RESET  = "\27[0m"
+
+function console.message(text, color, no_cr)
+  if no_cr then
+    new_line = ""
+  else
+    new_line = "\n"
+  end
+  if is_windows then
+    color = ""
+    reset = ""
+  else
+    reset = console.RESET
+  end
+  io.write(string.format("%s%s%s%s", color, text, reset, new_line))
+end
+
+function console.colorize(text, color)
+  if is_windows then
+    return text
+  else
+    return string.format("%s%s%s", color, text, console.RESET)
+  end
+end
+
+return console
+end
+end
+
+do
+local _ENV = _ENV
 package.preload[ "dict" ] = function( ... ) local arg = _G.arg;
 local interop = require("interop")
 
@@ -1244,6 +1285,7 @@ function Dict:init()
   self:def_macro("loop", "macros._loop")
   self:def_macro("ipairs:", "macros.for_ipairs")
   self:def_macro("pairs:", "macros.for_pairs")
+  self:def_macro("iter:", "macros.for_each")
   self:def_macro("to:", "macros._to")
   self:def_macro("step:", "macros._step")
   self:def_macro("#(", "macros.arity_call_lua")
@@ -1307,6 +1349,19 @@ function Env:find_var(forth_name)
     end
   end
   return self.parent and self.parent:find_var(forth_name)
+end
+
+function Env:var_names()
+  local result
+  if not self.parent then
+    result = {}
+  else
+    result = self.parent:var_names()
+  end
+  for _, each in ipairs(self.vars) do
+    table.insert(result, each.forth_name)
+  end
+  return result
 end
 
 return Env
@@ -1463,8 +1518,151 @@ end
 
 do
 local _ENV = _ENV
+package.preload[ "ln_repl_backend" ] = function( ... ) local arg = _G.arg;
+local console = require("console")
+local utils = require("utils")
+local ln = require("linenoise")
+
+ln.enableutf8()
+
+local Backend = {}
+
+function Backend:new(compiler, history_file, commands)
+  local obj = {compiler = compiler,
+               input = "",
+               commands = commands,
+               history_file = history_file}
+  setmetatable(obj, {__index = self})
+  if history_file then
+    ln.historyload(history_file)
+  end
+  obj:setup()
+  return obj
+end
+
+function Backend:setup()
+  ln.setcompletion(function(completion, str)
+    for _, match in ipairs(self:completer(str)) do
+      completion:add(match)
+    end
+  end)
+end
+
+local function add_completions(input, words, result)
+  for _, word in ipairs(words) do
+    local before, after = input:match("^(.*)%s(.*)$")
+    if not after then
+      after = input
+      before = ""
+    else
+      before = before .. " "
+    end
+    if utils.startswith(word, after) then
+      table.insert(result, before .. word)
+    end
+  end
+end
+
+local function resolve(input)
+  local obj = _G
+  for part in input:gmatch("[^%.]+") do
+    if obj[part] then
+      obj = obj[part]
+    else
+      return obj
+    end
+  end
+  return obj
+end
+
+local function add_props(input, result)
+  local obj = resolve(input)
+  if type(obj) ~= "table" or obj == _G then
+    return
+  end
+  local prefix = input:match("(.+%.)")
+  if not prefix then prefix = "" end
+  local last = input:match("[^%.]+$")
+  for key, val in pairs(obj) do
+    if not last or utils.startswith(key, last) then
+      table.insert(result, prefix .. key)
+    end
+  end
+end
+
+local function add_commands(input, result, commands)
+  for _, cmd in ipairs(commands) do
+    if utils.startswith(cmd, input) then
+      table.insert(result, cmd)
+    end
+  end
+end
+
+local function modules()
+  local result = {}
+  for key, val in pairs(_G) do
+    if type(val) == "table" then
+      table.insert(result, key)
+    end
+  end
+  return result
+end
+
+function Backend:completer(input)
+  local matches = {}
+  add_completions(input, self.compiler:word_list(), matches)
+  add_completions(input, self.compiler:var_names(), matches)
+  add_commands(input, matches, self.commands)
+  if input:find("%.") then
+    add_props(input, matches)
+  else
+    add_completions(input, modules(), matches)
+  end
+  return utils.unique(matches)
+end
+
+function Backend:prompt()
+  if self.multi_line then
+    return "..."
+  else
+    return "#"
+  end
+end
+
+function Backend:save_history(input)
+  if self.history_file then
+    ln.historyadd(input)
+    ln.historysave(self.history_file)
+  end
+end
+
+function Backend:read_line(prompt)
+  return utils.trim(ln.linenoise(prompt .. " "))
+end
+
+function Backend:read()
+  local prompt = console.colorize(self:prompt(), console.PURPLE)
+  if self.multi_line then
+    self.input = self.input .. "\n" .. self:read_line(prompt)
+  else
+    self.input = self:read_line(prompt)
+  end
+  return self.input
+end
+
+function Backend:set_multiline(bool)
+  self.multi_line = bool
+  ln.setmultiline(bool)
+end
+
+return Backend
+end
+end
+
+do
+local _ENV = _ENV
 package.preload[ "macros" ] = function( ... ) local arg = _G.arg;
-local aux = require("aux")
+local aux = require("stack_aux")
 local interop = require("interop")
 local ast = require("ast")
 local unpack = table.unpack or unpack
@@ -1614,9 +1812,12 @@ function macros.cr()
   return ast.func_call("print")
 end
 
-function macros.def_alias(compiler)
+function macros.def_alias(compiler, item)
   local forth_name = compiler:word()
   local exp = compiler:next_item()
+  if not forth_name or not exp then
+    compiler:err("alias needs a name and an expression", item)
+  end
   compiler:alias(compiler:compile_token(exp), forth_name)
 end
 
@@ -1658,7 +1859,7 @@ local function def_word(compiler, is_global, item)
   compiler:new_env("colon_" .. lua_name)
   local header = ast.func_header(lua_name, is_global)
   if compiler.state.last_word then
-    compiler:err("Word definitions cannot be nested", item)
+    compiler:err("Word definitions cannot be nested.", item)
   else
     compiler.state.last_word = header
   end
@@ -1675,6 +1876,9 @@ end
 
 function macros.tick(compiler, item)
   local name = compiler:word()
+  if not name then
+    compiler:err("A word is required for '", item)
+  end
   local word = compiler:find(name)
   if not word then
     compiler:err(name .. " is not found in dictionary", item)
@@ -1797,13 +2001,22 @@ end
 
 function macros.assignment(compiler, item)
   local name = compiler:word()
+  if not name then
+    compiler:err("Missing variable name.", item)
+  end
   if name == "var" then
     -- declare and assign of a new var
     name = compiler:word()
+    if not name then
+      compiler:err("Missing variable name.", item)
+    end
     return ast.init_local(compiler:def_var(name), ast.pop())
   elseif name == "global" then
     -- declare and assign of a new global
     name = compiler:word()
+    if not name then
+      compiler:err("Missing variable name.", item)
+    end
     return ast.init_global(compiler:def_global(name), ast.pop())
   else
     -- assignment of existing var
@@ -1921,33 +2134,55 @@ function macros._loop(compiler, item)
   return ast.keyword("end")
 end
 
-function macros.for_ipairs(compiler)
+function macros.for_ipairs(compiler, item)
   local var_name1 = compiler:word()
   local var_name2 = compiler:word()
+  if not var_name1 or not var_name2 then
+    compiler:err("ipairs needs two loop variables", item)
+  end
   compiler:new_env('IPAIRS_LOOP')
   compiler:def_var(var_name1)
   compiler:def_var(var_name2)
   return ast._foreach(var_name1, var_name2, ast._ipairs(ast.pop()))
 end
 
-function macros.for_pairs(compiler)
+function macros.for_pairs(compiler, item)
   local var_name1 = compiler:word()
   local var_name2 = compiler:word()
+  if not var_name1 or not var_name2 then
+    compiler:err("pairs needs two loop variables", item)
+  end
   compiler:new_env('PAIRS_LOOP')
   compiler:def_var(var_name1)
   compiler:def_var(var_name2)
   return ast._foreach(var_name1, var_name2, ast._pairs(ast.pop()))
 end
 
-function macros._to(compiler)
+function macros.for_each(compiler, item)
+  local var_name = compiler:word()
+  if not var_name then
+    compiler:err("iter needs one loop variable", item)
+  end
+  compiler:new_env('ITER_LOOP')
+  compiler:def_var(var_name)
+  return ast._foreach(var_name, nil, ast.pop())
+end
+
+function macros._to(compiler, item)
   local loop_var = compiler:word()
+  if not loop_var then
+    compiler:err("to loop needs a loop variable.", item)
+  end
   compiler:new_env('TO_LOOP')
   compiler:def_var(loop_var)
   return ast._for(loop_var, ast.pop2nd(), ast.pop(), nil)
 end
 
-function macros._step(compiler)
+function macros._step(compiler, item)
   local loop_var = compiler:word()
+  if not loop_var then
+    compiler:err("step loop needs a loop variable.", item)
+  end
   compiler:new_env('STEP_LOOP')
   compiler:def_var(loop_var)
   return ast._for(loop_var, ast.pop3rd(), ast.pop2nd(), ast.pop(), nil)
@@ -1971,7 +2206,9 @@ end
 
 function macros.see(compiler, item)
   local name = compiler:word()
-  if not name then return end
+  if not name then
+    compiler:err("See needs a word name", item)
+  end
   local word = compiler:find(name)
   if not word then
     compiler:err(name .. " is not found in dictionary", item)
@@ -2180,53 +2417,46 @@ do
 local _ENV = _ENV
 package.preload[ "repl" ] = function( ... ) local arg = _G.arg;
 local stack = require("stack")
+local utils = require("utils")
+local console = require("console")
 local Source = require("source")
 
-local SINGLE_LINE = 1
-local MULTI_LINE = 2
+local function load_backend(preferred, fallback)
+  local success, mod = pcall(require, preferred)
+  if success then
+    return mod
+  else
+    return require(fallback)
+  end
+end
 
 local Repl = {}
 
-local function join(dir, child)
-  if not dir or "" == dir then return child end
-  local sep = ""
-  if dir:sub(-1) ~= "/" and dir:sub(-1) ~= "\\" then
-    sep = package.config:sub(1, 1)
-  end
-  return dir .. sep .. child
-end
-
 local repl_ext = "repl_ext.eqx"
-local home = os.getenv("HOME") or os.getenv("USERPROFILE")
-local search_paths = { join(home, ".equinox"), "" }
 
-local function file_exists(filename)
-  local file = io.open(filename, "r")
-  if file then file:close() return true
-  else return false end
-end
-
-local function file_exists_in_any_of(filename, dirs)
-  for i, dir in ipairs(dirs) do
-    local path = join(dir, filename)
-    if file_exists(path) then
-      return path
-    end
-  end
-  return nil
-end
-
-local function extension(filename)
-  return filename:match("^.+(%.[^%.]+)$")
-end
+local commands = {
+  bye = "bye",
+  help = "help",
+  log_on = "log-on",
+  log_off = "log-off",
+  stack_on = "stack-on",
+  stack_off = "stack-off",
+  opt_on = "opt-on",
+  opt_off = "opt-off",
+  load_file = "load-file"
+}
 
 function Repl:new(compiler, optimizer)
-  local obj = {compiler = compiler,
+  local ReplBackend = load_backend("ln_repl_backend", "simple_repl_backend")
+  local obj = {backend = ReplBackend:new(
+                 compiler,
+                 utils.in_home(".equinox_repl_history"),
+                 utils.values(commands)),
+               compiler = compiler,
                optimizer = optimizer,
-               mode = SINGLE_LINE,
+               ext_dir = os.getenv("EQUINOX_EXT_DIR") or "./ext",
                always_show_stack = false,
                repl_ext_loaded = false,
-               input = "",
                log_result = false }
   setmetatable(obj, {__index = self})
   return obj
@@ -2261,16 +2491,15 @@ math.randomseed(os.time())
 function Repl:welcome(version)
   print("Equinox Forth Console (" .. _VERSION .. ") @ Delta Quadrant.")
   print(messages[math.random(1, #messages)])
-  io.write("\27[1;96m")
-  print(string.format([[
+  console.message(string.format([[
  __________________          _-_
  \__(=========/_=_/ ____.---'---`---.___
             \_ \    \----._________.---/
               \ \   /  /    `-_-'
          ___,--`.`-'..'-_
         /____          (|
-              `--.____,-'   v%s]], version))
-  print("\27[0m")
+              `--.____,-'   v%s
+]], version), console.CYAN)
   print("Type 'words' for wordlist, 'bye' to exit or 'help'.")
   print("First time Forth user? Type: load-file tutorial")
 end
@@ -2285,54 +2514,33 @@ local function show_help()
 - stack-on "always show stack after each input"
 - stack-off "don't show stack after each input"
 - bye "exit repl"
-- help "show this help"
-  ]])
-end
-
-function Repl:prompt()
-  if self.mode == SINGLE_LINE then
-    return "#"
-  else
-    return "..."
-  end
-end
-
-function Repl:show_prompt()
-  io.write(string.format("\27[1;95m%s \27[0m", self:prompt()))
+- help "show this help"]])
 end
 
 function Repl:read()
-  if self.mode == SINGLE_LINE then
-    self.input = io.read()
-  else
-    self.input = self.input .. "\n" .. io.read()
-  end
+  return self.backend:read()
 end
 
-local function trim(str)
-  return str:match("^%s*(.-)%s*$")
-end
-
-function Repl:process_commands()
-  local command = trim(self.input)
-  if command == "bye" then
+function Repl:process_commands(input)
+  local command = utils.trim(input)
+  if command == commands.bye then
     os.exit(0)
   end
-  if command == "help" then
+  if command == commands.help then
     show_help()
     return true
   end
-  if command == "log-on" then
+  if command == commands.log_on then
     self.log_result = true
     print("Log turned on")
     return true
   end
-  if command == "log-off" then
+  if command == commands.log_off then
     self.log_result = false
     print("Log turned off")
     return true
   end
-  if command == "stack-on" then
+  if command == commands.stack_on then
     if self.repl_ext_loaded then
       self.always_show_stack = true
       print("Show stack after input is on")
@@ -2341,30 +2549,41 @@ function Repl:process_commands()
     end
     return true
   end
-  if command == "stack-off" then
+  if command == commands.stack_off then
     self.always_show_stack = off
     print("Show stack after input is off")
     return true
   end
-  if command == "opt-on" then
+  if command == commands.opt_on then
     self.optimizer:enable(true)
     print("Optimization turned on")
     return true
   end
-  if command == "opt-off" then
+  if command == commands.opt_off then
     self.optimizer:enable(false)
     print("Optimization turned off")
     return true
   end
-  local path = command:match("load%-file%s+(.+)")
-  if path then
-    if not file_exists(path) and not extension(path) then
-      path = path .. ".eqx"
-    end
-    if file_exists(path) then
-      self:safe_call(function() self.compiler:eval_file(path) end)
+  if command:sub(1, #commands.load_file) == commands.load_file
+  then
+    local path = utils.trim(command:sub(#commands.load_file + 1))
+    if path and path ~= "" then
+      if not utils.exists(path) and not utils.extension(path) then
+        path = path .. ".eqx"
+      end
+      if not utils.exists(path) and
+        not (string.find(path, "/") or
+              string.find(path, "\\"))
+      then
+        path = utils.join(self.ext_dir, path)
+      end
+      if utils.exists(path) then
+        self:safe_call(function() self.compiler:eval_file(path) end)
+      else
+        print("File does not exist: " .. path)
+      end
     else
-      print("File does not exist: " .. path)
+      print("Missing file path.")
     end
     return true
   end
@@ -2372,17 +2591,18 @@ function Repl:process_commands()
 end
 
 function Repl:print_err(result)
-  print("\27[91m" .. "Red Alert: " .. "\27[0m" .. tostring(result))
+  console.message("Red Alert: ", console.RED, true)
+  print(tostring(result))
 end
 
 function Repl:print_ok()
   if stack:depth() > 0 then
-    print("\27[92m" .. "OK(".. stack:depth()  .. ")" .. "\27[0m")
+    console.message("OK(".. stack:depth()  .. ")", console.GREEN)
     if self.always_show_stack and self.repl_ext_loaded then
       self.compiler:eval_text(".s")
     end
   else
-    print("\27[92mOK\27[0m")
+    console.message("OK", console.GREEN)
   end
 end
 
@@ -2396,34 +2616,78 @@ function Repl:safe_call(func)
 end
 
 function Repl:start()
-  local ext = file_exists_in_any_of(repl_ext, search_paths)
+  local ext = utils.file_exists_in_any_of(repl_ext, {self.ext_dir})
   if ext then
     self.compiler:eval_file(ext)
     self.repl_ext_loaded = true
   end
-  local prompt = "#"
   while true do
-    self:show_prompt()
-    self:read()
-    if not self:process_commands() then
+    local input = self:read()
+    if self:process_commands(input) then
+      self.backend:save_history(input)
+    else
       local success, result = pcall(function ()
           return self.compiler:compile_and_load(
-            Source:from_text(self.input), self.log_result)
+            Source:from_text(input), self.log_result)
       end)
       if not success then
         self:print_err(result)
       elseif not result then
-        self.mode = MULTI_LINE
+        self.backend:set_multiline(true)
         self.compiler:reset_state()
       else
-        self.mode = SINGLE_LINE
+        self.backend:set_multiline(false)
         self:safe_call(function() result() end)
+        self.backend:save_history(input:gsub("[\r\n]", " "))
       end
     end
   end
 end
 
 return Repl
+end
+end
+
+do
+local _ENV = _ENV
+package.preload[ "simple_repl_backend" ] = function( ... ) local arg = _G.arg;
+local console = require("console")
+
+local Backend = {}
+
+function Backend:new()
+  local obj = {input = ""}
+  setmetatable(obj, {__index = self})
+  return obj
+end
+
+function Backend:prompt()
+  if self.multi_line then
+    return "..."
+  else
+    return "#"
+  end
+end
+
+function Backend:save_history(input)
+  -- unsupported
+end
+
+function Backend:read()
+  console.message(self:prompt() .. " ", console.PURPLE, true)
+  if self.multi_line then
+    self.input = self.input .. "\n" .. io.read()
+  else
+    self.input = io.read()
+  end
+  return self.input
+end
+
+function Backend:set_multiline(bool)
+  self.multi_line = bool
+end
+
+return Backend
 end
 end
 
@@ -2500,6 +2764,16 @@ local Stack = require("stack_def")
 local stack = Stack:new("data-stack")
 
 return stack
+end
+end
+
+do
+local _ENV = _ENV
+package.preload[ "stack_aux" ] = function( ... ) local arg = _G.arg;
+local Stack = require("stack_def")
+local aux = Stack:new("aux-stack")
+
+return aux
 end
 end
 
@@ -2695,6 +2969,10 @@ local _ENV = _ENV
 package.preload[ "utils" ] = function( ... ) local arg = _G.arg;
 local utils = {}
 
+function utils.trim(str)
+  return str:match("^%s*(.-)%s*$")
+end
+
 function utils.deepcopy(orig)
   local orig_type = type(orig)
   local copy
@@ -2710,6 +2988,36 @@ function utils.deepcopy(orig)
   return copy
 end
 
+function utils.home()
+  return os.getenv("USERPROFILE") or os.getenv("HOME")
+end
+
+function utils.in_home(file)
+  return utils.join(utils.home(), file)
+end
+
+function utils.values(tbl)
+  local vals = {}
+  for k, v in pairs(tbl) do
+    table.insert(vals, v)
+  end
+  return vals
+end
+
+function utils.extension(filename)
+  return filename:match("^.+(%.[^%.]+)$")
+end
+
+function utils.join(dir, child)
+  if not dir or "" == dir then return child end
+  local sep = ""
+  if dir:sub(-1) ~= "/" and dir:sub(-1) ~= "\\" then
+    sep = package.config:sub(1, 1)
+  end
+  return dir .. sep .. child
+end
+
+
 function utils.exists(filename)
   local file = io.open(filename, "r")
   if file then
@@ -2720,11 +3028,45 @@ function utils.exists(filename)
   end
 end
 
+function utils.file_exists_in_any_of(filename, dirs)
+  for i, dir in ipairs(dirs) do
+    local path = utils.join(dir, filename)
+    if utils.exists(path) then
+      return path
+    end
+  end
+  return nil
+end
+
+function utils.unique(tbl)
+  local seen = {}
+  local result = {}
+  for _, v in ipairs(tbl) do
+    if not seen[v] then
+      seen[v] = true
+      table.insert(result, v)
+    end
+  end
+  return result
+end
+
+function utils.keys(tbl)
+  local result = {}
+  for key, _ in pairs(tbl) do
+    table.insert(result, key)
+  end
+  return result
+end
+
+function utils.startswith(str, prefix)
+  return string.sub(str, 1, #prefix) == prefix
+end
+
 return utils
 end
 end
 
-__VERSION__="0.0.2073"
+__VERSION__="0.1-71"
 
 local Compiler = require("compiler")
 local Optimizer = require("ast_optimizer")
