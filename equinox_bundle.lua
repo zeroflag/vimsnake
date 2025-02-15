@@ -55,16 +55,16 @@ function ast.aux_op(operation)
   return {name = "aux_op", op = operation}
 end
 
-function ast.push(item)
-  return {name  = "push", item = item}
+function ast.push(exp)
+  return {name  = "push", exp = exp}
 end
 
 function ast.push_many(func_call)
   return {name  = "push_many", func_call = func_call}
 end
 
-function ast.aux_push(item)
-  return {name  = "push_aux", item = item}
+function ast.aux_push(exp)
+  return {name  = "push_aux", exp = exp}
 end
 
 function ast._while(cond)
@@ -193,29 +193,9 @@ end
 do
 local _ENV = _ENV
 package.preload[ "ast_matchers" ] = function( ... ) local arg = _G.arg;
+local asts = require("ast")
+
 local AstMatcher = {}
-
-local function is(ast, name) return ast.name == name end
-local function is_literal(ast) return is(ast, "literal") end
-local function is_identifier(ast) return is(ast, "identifier") end
-local function is_stack_consume(ast) return is(ast, "stack_consume") end
-local function any(ast) return ast ~= nil end
-
-local function is_literal_tbl_at(ast)
-  return is(ast, "table_at")
-    and (is_identifier(ast.tbl) or is_literal(ast.tbl))
-    and (is_identifier(ast.key) or is_literal(ast.key))
-end
-
-local function is_const(ast)
-  return is_identifier(ast)
-    or is_literal(ast)
-    or is_literal_tbl_at(ast)
-end
-
-local function is_push_const(ast)
-  return is(ast, "push") and is_const(ast.item)
-end
 
 local function OR(...)
   local fs = {...}
@@ -228,60 +208,150 @@ local function OR(...)
   end
 end
 
+local function AND(...)
+  local fs = {...}
+  return function(ast)
+    local result = nil
+    for i, f in ipairs(fs) do
+      if result == nil then
+        result = f(ast)
+      else
+        result = result and f(ast)
+      end
+    end
+    return result
+  end
+end
+
 local function NOT(f)
   return function(ast)
     return not f(ast)
   end
 end
 
-local function is_stack_op(op)
-  return function(ast)
-    return is(ast, "stack_op") and ast.op == op
+local function is(ast, name) return ast.name == name end
+local function any(ast) return ast ~= nil end
+
+local function has(name, matcher)
+  return function (ast)
+    return matcher(ast[name])
   end
 end
 
-local function is_push_binop(ast)
-  return is(ast, "push") and is(ast.item, "bin_op")
+local function eq(expected)
+  return function (val)
+    return val == expected
+  end
 end
 
-local function is_push_binop_pop(ast)
-  return is_push_binop(ast)
-    and is_stack_consume(ast.item.p1)
-    and is_stack_consume(ast.item.p2)
-end
+local function has_name(name) return has("name", eq(name)) end
+local function has_op(name) return has("op", eq(name)) end
+local function has_exp(matcher) return has("exp", matcher) end
+local function has_tbl(matcher) return has("tbl", matcher) end
+local function has_key(matcher) return has("key", matcher) end
+local function has_p1(matcher) return has("p1", matcher) end
+local function has_p2(matcher) return has("p2", matcher) end
+local function has_value(val) return has("value", eq(val)) end
 
-local function is_push_unop(ast)
-  return is(ast, "push") and is(ast.item, "unary_op")
-end
+local is_identifier = has_name("identifier")
+local is_literal = has_name("literal")
+local is_stack_consume = has_name("stack_consume")
+local is_assignment = AND(has_name("assignment"), has_exp(is_stack_consume))
+local is_if = AND(has_name("if"), has_exp(is_stack_consume))
+local is_init_local = AND(has_name("init_local"), has_exp(is_stack_consume))
+local is_push_binop = AND(has_name("push"), has_exp(has_name("bin_op")))
+local is_push_unop  = AND(has_name("push"), has_exp(has_name("unary_op")))
+local is_pop = AND(is_stack_consume, has_op("pop"))
 
-local function is_push_unop_pop(ast)
-  return is_push_unop(ast) and is_stack_consume(ast.item.exp)
-end
+local is_literal_tbl_at = AND(
+  has_name("table_at"),
+  AND(
+    OR(has_tbl(is_identifier), has_tbl(is_literal)),
+    OR(has_key(is_identifier), has_key(is_literal))))
 
-local function is_tbl_at(ast)
-  return is(ast, "push")
-    and is(ast.item, "table_at")
-    and is_stack_consume(ast.item.tbl)
-    and is_stack_consume(ast.item.key)
-end
+local is_const = OR(is_identifier, is_literal, is_literal_tbl_at)
+local is_push_const = AND(has_name("push"), has_exp(is_const))
+local is_push_unop_pop = AND(is_push_unop, has_exp(has_exp(is_stack_consume)))
+local is_stack_op = has_name("stack_op")
+local is_stack_peek = has_name("stack_peek")
+local is_dup  = AND(is_stack_op, has_op("dup"))
+local is_2dup = AND(is_stack_op, has_op("dup2"))
+local is_over = AND(is_stack_op, has_op("over"))
+local is_tos  = AND(is_stack_peek, has_op("tos"))
+local has_p1_pop = has_p1(has_op("pop"))
+local has_p2_pop = has_p2(has_op("pop"))
+local has_lit_value = AND(is_literal, has("value", eq(1)))
 
-local function is_tbl_put(ast)
-  return is(ast, "table_put") -- no push here
-    and is_stack_consume(ast.tbl)
-    and is_stack_consume(ast.key)
-end
+local is_push_binop_pop = AND(
+  has_name("push"),
+  has_exp(AND(
+             has_name("bin_op"),
+             has_p1(is_stack_consume),
+             has_p2(is_stack_consume))))
 
-local function is_assignment(ast)
-  return is(ast, "assignment") and is_stack_consume(ast.exp)
-end
+local is_exp_binop_pop = AND(
+  has("exp", any),
+  has_exp(AND(
+             has_name("bin_op"),
+             has_p1(is_stack_consume),
+             has_p2(is_stack_consume))))
 
-local function is_if(ast)
-  return is(ast, "if") and is_stack_consume(ast.exp)
-end
+local is_wrapped_binop_tos = AND(
+  has("exp", any),
+  has_exp(AND(
+             has_name("bin_op"),
+             OR(
+               AND(has_p1(is_tos)),
+               AND(has_p2(is_tos), NOT(has_p1(is_stack_consume)))))))
 
-local function is_init_local(ast)
-  return is(ast, "init_local") and is_stack_consume(ast.exp)
-end
+local is_inc = AND(
+  has_name("push"),
+  has_exp(AND(
+            has_name("bin_op"),
+            has_op("+"),
+            OR(
+              AND(has_p1_pop, has_p2(has_value(1))),
+              AND(has_p2_pop, has_p1(has_value(1)))))))
+
+local is_neg = AND(
+  has_name("push"),
+  has_exp(AND(
+            has_name("unary_op"),
+            has_exp(is_pop),
+            has_op("not"))))
+
+local is_wrapped_binop_free_operand = AND(
+  has("exp", any),
+  has_exp(AND(
+             has_name("bin_op"),
+             OR(has_p1_pop,
+                has_p2_pop))))
+
+local inlined_push_unop = AND(
+  is_push_unop,
+  NOT(has_exp(has_exp(is_stack_consume))))
+
+local inlined_push_binop = AND(
+  is_push_binop,
+  OR(
+    -- fully inlined
+    AND(NOT(has_exp(has_p1(is_stack_consume)), NOT(has_exp(has_p2(is_stack_consume))))),
+    -- partially inlined
+    AND(has_exp(has_p1_pop), NOT(has_exp(has_p2(is_stack_consume)))),
+    AND(has_exp(has_p2_pop), NOT(has_exp(has_p1(is_stack_consume))))))
+
+local is_tbl_at = AND(
+  has_name("push"),
+  has_exp(
+    AND(
+      has_name("table_at"),
+      has_tbl(is_stack_consume),
+      has_key(is_stack_consume))))
+
+local is_tbl_put = AND(
+  has_name("table_put"),
+  has_tbl(is_stack_consume),
+  has_key(is_stack_consume))
 
 function AstMatcher:new(name, parts)
   local obj = {name = name, parts = parts, logging = false}
@@ -321,7 +391,11 @@ PutParamsInline = AstMatcher:new()
 StackOpBinaryInline = AstMatcher:new()
 BinaryInline = AstMatcher:new()
 BinaryInlineP2 = AstMatcher:new()
+BinaryConstBinaryInline = AstMatcher:new()
 InlineGeneralUnary = AstMatcher:new()
+TosBinaryInline = AstMatcher:new()
+IncInline = AstMatcher:new()
+NegInline = AstMatcher:new()
 
 --[[
  Inline table at parameters
@@ -330,8 +404,8 @@ InlineGeneralUnary = AstMatcher:new()
 function AtParamsInline:optimize(ast, i, result)
   self:log("inlining tbl at params")
   local tbl, idx, op = ast[i], ast[i + 1], ast[i + 2]
-  op.item.tbl = tbl.item
-  op.item.key = idx.item
+  op.exp.tbl = tbl.exp
+  op.exp.key = idx.exp
   table.insert(result, op)
 end
 
@@ -342,12 +416,12 @@ end
 function AtParamsInlineP2:optimize(ast, i, result)
   self:log("inlining tbl at 2nd param")
   local tbl, idx, op = ast[i], ast[i + 1], ast[i + 2]
-  if op.item.tbl.name == "stack_consume" and
-     op.item.tbl.op == "pop2nd"
+  if op.exp.tbl.name == "stack_consume" and
+     op.exp.tbl.op == "pop2nd"
   then
-    op.item.tbl.op = "pop"
+    op.exp.tbl.op = "pop"
   end
-  op.item.key = idx.item
+  op.exp.key = idx.exp
   table.insert(result, tbl)
   table.insert(result, op)
 end
@@ -359,9 +433,9 @@ end
 function PutParamsInline:optimize(ast, i, result)
   self:log("inlining tbl put params")
   local tbl, key, val, op = ast[i], ast[i + 1], ast[i + 2], ast[i + 3]
-  op.tbl = tbl.item
-  op.key = key.item
-  op.value = val.item
+  op.tbl = tbl.exp
+  op.key = key.exp
+  op.value = val.exp
   table.insert(result, op)
 end
 
@@ -383,22 +457,48 @@ function InlineGeneralUnary:optimize(ast, i, result)
   local target
   if is_push_unop_pop(operator) then
     -- unary is embedded into a push
-    target = operator.item
+    target = operator.exp
   else
     target = operator
   end
 
-  if is_stack_op("dup")(p1) then
+  if is_dup(p1) then
     self:log(operator.name .. " (dup)")
     target.exp.op = "tos"
     target.exp.name ="stack_peek"
-  elseif is_stack_op("over")(p1) then
+  elseif is_over(p1) then
     self:log(operator.name .. " (over)")
     target.exp.op = "tos2"
     target.exp.name ="stack_peek"
   else
     self:log(operator.name)
-    target.exp = p1.item
+    target.exp = p1.exp
+  end
+
+  table.insert(result, operator)
+end
+
+function InlineGeneralUnary:optimize(ast, i, result)
+  local p1, operator = ast[i], ast[i + 1]
+  local target
+  if is_push_unop_pop(operator) then
+    -- unary is embedded into a push
+    target = operator.exp
+  else
+    target = operator
+  end
+
+  if is_dup(p1) then
+    self:log(operator.name .. " (dup)")
+    target.exp.op = "tos"
+    target.exp.name ="stack_peek"
+  elseif is_over(p1) then
+    self:log(operator.name .. " (over)")
+    target.exp.op = "tos2"
+    target.exp.name ="stack_peek"
+  else
+    self:log(operator.name)
+    target.exp = p1.exp
   end
 
   table.insert(result, operator)
@@ -415,36 +515,37 @@ end
 ]]--
 function StackOpBinaryInline:optimize(ast, i, result)
   local p1, p2, op = ast[i], ast[i + 1], ast[i + 2]
-  if is_stack_op("dup")(p1) and is_stack_op("dup")(p2) then
+  self:log("inlining stack op in binary")
+  if is_dup(p1) and is_dup(p2) then
     -- double dup
     self:log("dup dup")
-    op.item.p1.op = "tos"
-    op.item.p2.op = "tos"
-    op.item.p1.name = "stack_peek"
-    op.item.p2.name = "stack_peek"
+    op.exp.p1.op = "tos"
+    op.exp.p2.op = "tos"
+    op.exp.p1.name = "stack_peek"
+    op.exp.p2.name = "stack_peek"
     table.insert(result, op)
-  elseif is_stack_op("dup2")(p2) then
+  elseif is_2dup(p2) then
     self:log("2dup")
-    op.item.p1.op = "tos2"
-    op.item.p2.op = "tos"
-    op.item.p1.name = "stack_peek"
-    op.item.p2.name = "stack_peek"
+    op.exp.p1.op = "tos2"
+    op.exp.p2.op = "tos"
+    op.exp.p1.name = "stack_peek"
+    op.exp.p2.name = "stack_peek"
     table.insert(result, p1)
     table.insert(result, op)
-  elseif is_stack_op("dup")(p2) then
+  elseif is_dup(p2) then
     -- single dup
     self:log("single dup")
-    op.item.p1.op = "tos"
-    op.item.p1.name = "stack_peek"
+    op.exp.p1.op = "tos"
+    op.exp.p1.name = "stack_peek"
     table.insert(result, p1)
     table.insert(result, op)
-  elseif is_stack_op("over")(p2) then
+  elseif is_over(p2) then
     -- single over
     self:log("over")
-    op.item.p1.op = "pop"
-    op.item.p1.name = "stack_peek"
-    op.item.p2.op = "tos"
-    op.item.p2.name = "stack_peek"
+    op.exp.p1.op = "pop"
+    op.exp.p1.name = "stack_consume"
+    op.exp.p2.op = "tos"
+    op.exp.p2.name = "stack_peek"
     table.insert(result, p1)
     table.insert(result, op)
   else
@@ -462,8 +563,8 @@ end
 function BinaryInline:optimize(ast, i, result)
   self:log("inlining binary operator params")
   local p1, p2, op = ast[i], ast[i + 1], ast[i + 2]
-  op.item.p1 = p1.item
-  op.item.p2 = p2.item
+  op.exp.p1 = p1.exp
+  op.exp.p2 = p2.exp
   table.insert(result, op)
 end
 
@@ -477,20 +578,67 @@ end
 function BinaryInlineP2:optimize(ast, i, result)
   self:log("inlining binary operator's 2nd param")
   local p1, p2, op = ast[i], ast[i + 1], ast[i + 2]
-  if op.item.p1.name == "stack_consume" then
-    if op.item.p1.op == "pop2nd" then
-      op.item.p1.op = "pop"
+  if op.exp.p1.name == "stack_consume" then
+    if op.exp.p1.op == "pop2nd" then
+      op.exp.p1.op = "pop"
     end
-    if is_stack_op("dup")(p1) then
-      op.item.p1.op = "tos" -- inline if dup
-      op.item.p1.name = "stack_peek"
+    if is_dup(p1) then
+      op.exp.p1.op = "tos" -- inline if dup
+      op.exp.p1.name = "stack_peek"
     end
   end
-  op.item.p2 = p2.item -- inline const param
-  if not is_stack_op("dup")(p1) then -- dup was inlined skip it
+  op.exp.p2 = p2.exp -- inline const param
+  if not is_dup(p1) then -- dup was inlined skip it
     table.insert(result, p1)
   end
   table.insert(result, op)
+end
+
+function BinaryConstBinaryInline:optimize(ast, i, result)
+  self:log("inlining binary to binary operator")
+  local bin, op = ast[i], ast[i + 1]
+  local target = op.exp
+  if target.p1.op == "pop" then
+    target.p1 = bin.exp
+    if target.p2.op == "tos" then
+      target.p2 = bin.exp
+    elseif target.p2.op == "pop2nd" then
+      target.p2.op = "pop"
+    end
+  elseif target.p2.op == "pop" then
+    target.p2 = bin.exp
+    if target.p1.op == "tos" then
+      target.p1 = bin.exp
+    elseif target.p1.op == "pop2nd" then
+      target.p1.op = "pop"
+    end
+  else -- shouldn't happen
+    error("one of binary operator's param was expected to be stack_consume")
+  end
+  table.insert(result, op)
+end
+
+function TosBinaryInline:optimize(ast, i, result)
+  self:log("inlining binary tos operand")
+  local cons, op = ast[i], ast[i + 1]
+  if op.exp.p1.op == "tos" then
+    op.exp.p1 = cons.exp
+  end
+  if op.exp.p2.op == "tos" then
+    op.exp.p2 = cons.exp
+  end
+  table.insert(result, cons)
+  table.insert(result, op)
+end
+
+function IncInline:optimize(ast, i, result)
+  self:log("inlining inc")
+  table.insert(result, asts.stack_op("_inc"))
+end
+
+function NegInline:optimize(ast, i, result)
+  self:log("inlining neg")
+  table.insert(result, asts.stack_op("_neg"))
 end
 
 return {
@@ -509,22 +657,32 @@ return {
 
   BinaryInline:new(
     "binary inline",
-    {is_push_const, is_push_const, is_push_binop_pop}),
+    {is_push_const, is_push_const, is_exp_binop_pop}),
 
   BinaryInlineP2:new(
     "binary p2 inline",
-    {NOT(is_push_const), is_push_const, is_push_binop_pop}),
+    {NOT(is_push_const), is_push_const, is_exp_binop_pop}),
+
+  BinaryConstBinaryInline:new(
+    "binary const binary inline",
+     {OR(inlined_push_binop,
+         inlined_push_unop),
+      is_wrapped_binop_free_operand}),
 
   StackOpBinaryInline:new(
     "stackop binary inline",
-    {any, OR(is_stack_op("dup"),
-             is_stack_op("dup2"), -- 2dup
-             is_stack_op("over")), is_push_binop_pop}),
+    {any, OR(is_dup,
+             is_2dup,
+             is_over), is_push_binop_pop}),
+
+  TosBinaryInline:new(
+    "tos binary inline",
+    {is_push_const, is_wrapped_binop_tos}),
 
   InlineGeneralUnary:new(
     "inline general unary",
-    {OR(is_stack_op("dup"),
-        is_stack_op("over"),
+    {OR(is_dup,
+        is_over,
         is_push_const,
         is_push_unop,
         is_push_binop),
@@ -533,6 +691,8 @@ return {
         is_if,
         is_push_unop_pop)}),
 
+  IncInline:new("inline inc", {is_inc}),
+  NegInline:new("inline neg", {is_neg}),
 }
 end
 end
@@ -577,6 +737,10 @@ function Optimizer:optimize_iteratively(ast)
     self:log(string.format(
           "Iteration: %d finished. Number of optimizations: %d",
           iterations, num_of_optimizations))
+    if iterations > 100 then
+      print("Aborting optimizer. This is likely a bug.")
+      break
+    end
   until num_of_optimizations == 0
   return ast
 end
@@ -619,30 +783,52 @@ function CodeGen:new()
   return obj
 end
 
+local function lit_bin_op(ast)
+  return ast.name == "bin_op"
+    and ast.p1.name == "literal"
+    and ast.p2.name == "literal"
+end
+
+local function lit_unary_op(ast)
+  return ast.name == "unary_op" and ast.exp.name == "literal"
+end
+
+local function inline_push(exp)
+  return "stack[#stack +1] = " .. exp
+end
+
 function CodeGen:gen(ast)
   if "stack_op" == ast.name
     or "stack_consume" == ast.name
-    or "stack_peek" == ast.name then
-    return "stack:" .. ast.op .. "()"
+    or "stack_peek" == ast.name
+  then
+    return ast.op .. "()"
   end
   if "aux_op" == ast.name then
-    return "aux:" .. ast.op .. "()"
+    return "a" .. ast.op .. "()"
   end
   if "push" == ast.name then
-    return string.format("stack:push(%s)", self:gen(ast.item))
+    if ast.exp.name == "literal" or
+       lit_bin_op(ast.exp) or
+       lit_unary_op(ast.exp)
+    then
+      return inline_push(self:gen(ast.exp)) -- bypass NIL check
+    else
+      return string.format("push(%s)", self:gen(ast.exp))
+    end
   end
   if "push_many" == ast.name then
-    return string.format("stack:push_many(%s)", self:gen(ast.func_call))
+    return string.format("push_many(%s)", self:gen(ast.func_call))
   end
   if "push_aux" == ast.name then
-    return string.format("aux:push(%s)", self:gen(ast.item))
+    return string.format("apush(%s)", self:gen(ast.exp))
   end
   if "unary_op" == ast.name then
     return string.format("%s %s", ast.op, self:gen(ast.exp))
   end
   if "bin_op" == ast.name then
     return string.format(
-      "%s %s %s", self:gen(ast.p1), ast.op, self:gen(ast.p2))
+      "(%s %s %s)", self:gen(ast.p1), ast.op, self:gen(ast.p2))
   end
   if "local" == ast.name then
     return "local " .. ast.var
@@ -669,7 +855,7 @@ function CodeGen:gen(ast)
     return ast.value
   end
   if "while" == ast.name then
-    return string.format("while(%s)do", self:gen(ast.cond))
+    return string.format("while (%s) do", self:gen(ast.cond))
   end
   if "until" == ast.name then
     return string.format("until %s", self:gen(ast.cond))
@@ -720,7 +906,7 @@ function CodeGen:gen(ast)
   end
   if "keyword" == ast.name then return ast.keyword end
   if "identifier" == ast.name then return ast.id end
-  if "table_new" == ast.name then return "stack:push({})" end
+  if "table_new" == ast.name then return inline_push("{}") end
   if "table_at" == ast.name then
     return string.format("%s[%s]",
                          self:gen(ast.tbl), self:gen(ast.key))
@@ -739,16 +925,6 @@ function CodeGen:gen(ast)
       end
     end
     return string.format("%s(%s)", ast.func_name, params)
-  end
-  if "code_seq" == ast.name then
-    local result = ""
-    for i, c in ipairs(ast.code) do
-      result = result .. self:gen(c)
-      if i < #ast.code then
-        result = result .. "\n"
-      end
-    end
-    return result
   end
   if "func_header" == ast.name then
     local prefix = ""
@@ -820,9 +996,8 @@ function Compiler:init(source)
   self.source = source
   self.parser = Parser:new(source.text)
   self.output = Output:new(marker .. self.source.name .. ">>")
-  self.output:append("local stack = require(\"stack\")")
-  self.output:new_line()
-  self.output:append("local aux = require(\"stack_aux\")")
+  self.output:append(
+    "local stack, aux = require(\"stack\"), require(\"stack_aux\")")
   self.output:new_line()
   self.ast = {}
   self.code_start = self.output:size()
@@ -929,8 +1104,7 @@ end
 function Compiler:add_ast_nodes(nodes, item)
   if #nodes > 0 then
     for i, each in ipairs(nodes) do
-      each.forth_line_number = item.line_number
-      table.insert(self.ast, each)
+      self:add_ast_nodes(each, item)
     end
   else
     nodes.forth_line_number = item.line_number
@@ -1254,6 +1428,7 @@ function Dict:init()
   self:def_macro("tuck", "macros.tuck")
   self:def_macro("depth", "macros.depth")
   self:def_macro("pick", "macros.pick")
+  self:def_macro("roll", "macros.roll")
   self:def_macro("adepth", "macros.adepth")
   self:def_macro("not", "macros._not")
   self:def_macro("and", "macros._and")
@@ -1798,7 +1973,11 @@ function macros.from_aux()
 end
 
 function macros.pick()
-  return ast.push(ast.func_call("stack:at", ast.pop()))
+  return ast.push(ast.func_call("pick", ast.pop()))
+end
+
+function macros.roll()
+  return ast.func_call("roll", ast.pop())
 end
 
 function macros.dot()
@@ -1814,11 +1993,24 @@ end
 
 function macros.def_alias(compiler, item)
   local forth_name = compiler:word()
-  local exp = compiler:next_item()
-  if not forth_name or not exp then
-    compiler:err("alias needs a name and an expression", item)
+  local alias = {}
+  if not forth_name then
+    compiler:err("Missing alias name", item)
   end
-  compiler:alias(compiler:compile_token(exp), forth_name)
+
+  repeat
+    local exp = compiler:next_item()
+    if exp then
+      table.insert(alias, compiler:compile_token(exp))
+    end
+  until not exp
+    or compiler:peek_chr() == "\n"
+    or compiler:peek_chr() == "\r"
+
+  if #alias == 0 then
+    compiler:err("Missing alias body", item)
+  end
+  compiler:alias(alias, forth_name)
 end
 
 local function def_word(compiler, is_global, item)
@@ -1891,7 +2083,7 @@ function macros.tick(compiler, item)
 end
 
 function macros.exec(compiler)
-  return ast.func_call("stack:pop()")
+  return ast.func_call("pop()")
 end
 
 function macros.ret(compiler)
@@ -1932,17 +2124,20 @@ function macros.arity_call_lua(compiler, item)
   if token ~= ")" then
     arity = tonumber(token)
     if not arity or arity < 0 then
-      compiler:err("expected arity number, got " .. tostring(token), item)
+      compiler:err("expected arity number, got '"
+                   .. tostring(token) .. "'", item)
     end
     token = compiler:word()
     if token ~= ")" then
       numret = tonumber(token)
       if not numret or numret < -1 or numret > 1 then
-        compiler:err("expected number of return values (0/1/-1), got " .. tostring(token), item)
+        compiler:err("expected number of return values (0/1/-1), got '"
+                     .. tostring(token) .. "'", item)
       end
       token = compiler:word()
       if token ~= ")" then
-        compiler:err("expected closing ), got " .. tostring(token), item)
+        compiler:err("expected closing ), got '"
+                     .. tostring(token) .. "'", item)
       end
     end
   end
@@ -2596,8 +2791,8 @@ function Repl:print_err(result)
 end
 
 function Repl:print_ok()
-  if stack:depth() > 0 then
-    console.message("OK(".. stack:depth()  .. ")", console.GREEN)
+  if depth() > 0 then
+    console.message("OK(".. depth()  .. ")", console.GREEN)
     if self.always_show_stack and self.repl_ext_loaded then
       self.compiler:eval_text(".s")
     end
@@ -2760,47 +2955,26 @@ end
 do
 local _ENV = _ENV
 package.preload[ "stack" ] = function( ... ) local arg = _G.arg;
-local Stack = require("stack_def")
-local stack = Stack:new("data-stack")
-
-return stack
-end
-end
-
-do
-local _ENV = _ENV
-package.preload[ "stack_aux" ] = function( ... ) local arg = _G.arg;
-local Stack = require("stack_def")
-local aux = Stack:new("aux-stack")
-
-return aux
-end
-end
-
-do
-local _ENV = _ENV
-package.preload[ "stack_def" ] = function( ... ) local arg = _G.arg;
-local Stack = {}
+local stack
 local NIL = {} -- nil cannot be stored in table, use this placeholder
+local name = "data-stack"
 
-function Stack:new(name)
-  local obj = {stack = {nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil,nil},
-               name = name}
-  setmetatable(obj, {__index = self})
-  return obj
+if table.create then
+  stack = table.create(32)
+else
+  stack = {nil, nil, nil, nil, nil, nil, nil, nil}
 end
 
-function Stack:push(e)
+function push(e)
   if e ~= nil then
-    self.stack[#self.stack + 1] = e
+    stack[#stack + 1] = e
   else
-    self.stack[#self.stack + 1] = NIL
+    stack[#stack + 1] = NIL
   end
 end
 
-function Stack:push_many(...)
+function push_many(...)
   local args = {...}
-  local stack = self.stack
   local n = #stack
   for i = 1, #args do
     if args[i] ~= nil then
@@ -2811,156 +2985,173 @@ function Stack:push_many(...)
   end
 end
 
-function Stack:pop()
-  local stack = self.stack
+function pop()
   local size = #stack
-  if size == 0 then
-    error("Stack underflow: " .. self.name)
-  end
+  if size == 0 then error("Stack underflow: " .. name) end
   local item = stack[size]
   stack[size] = nil
   if item ~= NIL then return item else return nil end
 end
 
-function Stack:pop2nd()
-  local stack = self.stack
+function pop2nd()
   local n = #stack
-  if n < 2 then
-    error("Stack underflow: " .. self.name)
-  end
+  if n < 2 then error("Stack underflow: " .. name) end
   local item = stack[n - 1]
   stack[n -1] = stack[n]
   stack[n] = nil
   if item ~= NIL then return item else return nil end
 end
 
-function Stack:pop3rd()
-  local n = #self.stack
-  if n < 3 then
-    error("Stack underflow: " .. self.name)
-  end
-  local item = table.remove(self.stack, n - 2)
+function pop3rd()
+  local n = #stack
+  if n < 3 then error("Stack underflow: " .. name) end
+  local item = table.remove(stack, n - 2)
   if item ~= NIL then return item else return nil end
 end
 
-function Stack:swap()
-  local stack = self.stack
+function swap()
   local n = #stack
-  if n < 2 then
-    error("Stack underflow: " .. self.name)
-  end
+  if n < 2 then error("Stack underflow: " .. name) end
   stack[n], stack[n - 1] = stack[n - 1], stack[n]
 end
 
-function Stack:rot()
-  local stack = self.stack
+function rot()
   local n = #stack
-  if n < 3 then
-    error("Stack underflow: " .. self.name)
-  end
+  if n < 3 then error("Stack underflow: " .. name) end
   local new_top = stack[n -2]
   table.remove(stack, n - 2)
   stack[n] = new_top
 end
 
-function Stack:mrot()
-  local stack = self.stack
+function mrot()
   local n = #stack
-  if n < 3 then
-    error("Stack underflow: " .. self.name)
-  end
+  if n < 3 then error("Stack underflow: " .. name) end
   local temp = stack[n]
   stack[n] = nil
   table.insert(stack, n - 2, temp)
 end
 
-function Stack:over()
-  local stack = self.stack
+function over()
   local n = #stack
-  if n < 2 then
-    error("Stack underflow: " .. self.name)
-  end
+  if n < 2 then error("Stack underflow: " .. name) end
   stack[n + 1] = stack[n - 1]
 end
 
-function Stack:tuck()
-  local n = #self.stack
-  if n < 2 then
-    error("Stack underflow: " .. self.name)
-  end
-  table.insert(self.stack, n - 1, self.stack[n])
+function tuck()
+  local n = #stack
+  if n < 2 then error("Stack underflow: " .. name) end
+  table.insert(stack, n - 1, stack[n])
 end
 
-function Stack:nip()
-  local stack = self.stack
+function nip()
   local n = #stack
-  if n < 2 then
-    error("Stack underflow: " .. self.name)
-  end
+  if n < 2 then error("Stack underflow: " .. name) end
   stack[n - 1] = stack[n]
   stack[n] = nil
 end
 
-function Stack:dup()
-  local stack = self.stack
+function dup()
   local n = #stack
-  if n < 1 then
-    error("Stack underflow: " .. self.name)
-  end
+  if n < 1 then error("Stack underflow: " .. name) end
   stack[n + 1] = stack[n]
 end
 
-function Stack:dup2()
-  local stack = self.stack
+function dup2()
   local n = #stack
-  if n < 2 then
-    error("Stack underflow: " .. self.name)
-  end
+  if n < 2 then error("Stack underflow: " .. name) end
   local tos1 = stack[n]
   local tos2 = stack[n - 1]
   stack[n + 1] = tos2
   stack[n + 2] = tos1
 end
 
-function Stack:tos()
-  local item = self.stack[#self.stack]
-  if item == nil then
-    error("Stack underflow: " .. self.name)
-  end
+function tos()
+  local item = stack[#stack]
+  if item == nil then error("Stack underflow: " .. name) end
   if item ~= NIL then return item else return nil end
 end
 
-function Stack:tos2()
-  local item = self.stack[#self.stack - 1]
-  if item == nil then
-    error("Stack underflow: " .. self.name)
-  end
+function tos2()
+  local item = stack[#stack - 1]
+  if item == nil then error("Stack underflow: " .. name) end
   if item ~= NIL then return item else return nil end
 end
 
-function Stack:_and()
-  local a, b = self:pop(), self:pop()
-  self:push(a and b)
+function _and()
+  local a, b = pop(), pop()
+  push(a and b)
 end
 
-function Stack:_or()
-  local a, b = self:pop(), self:pop()
-  self:push(a or b)
+function _or()
+  local a, b = pop(), pop()
+  push(a or b)
 end
 
-function Stack:depth()
-  return #self.stack
+function _inc()
+  local n = #stack
+  if n < 1 then error("Stack underflow: " .. name) end
+  stack[n] = stack[n] + 1
 end
 
-function Stack:at(index)
-  local item = self.stack[#self.stack - index]
-  if item == nil then
-    error("Stack underflow: " .. self.name)
-  end
+function _neg()
+  local n = #stack
+  if n < 1 then error("Stack underflow: " .. name) end
+  stack[n] = not stack[n]
+end
+
+function depth()
+  return #stack
+end
+
+function pick(index)
+  local item = stack[#stack - index]
+  if item == nil then error("Stack underflow: " .. name) end
   if item ~= NIL then return item else return nil end
 end
 
-return Stack
+function roll(index)
+  if index == 0 then return end
+  local n = #stack
+  if n <= index then error("Stack underflow: " .. name) end
+  local new_top = stack[n -index]
+  table.remove(stack, n - index)
+  stack[n] = new_top
+end
+
+return stack
+end
+end
+
+do
+local _ENV = _ENV
+package.preload[ "stack_aux" ] = function( ... ) local arg = _G.arg;
+local stack = {}
+local NIL = {} -- nil cannot be stored in table, use this placeholder
+local name = "aux-stack"
+
+function apush(e)
+  if e ~= nil then
+    stack[#stack + 1] = e
+  else
+    stack[#stack + 1] = NIL
+  end
+end
+
+function apop()
+  local size = #stack
+  if size == 0 then
+    error("Stack underflow: " .. name)
+  end
+  local item = stack[size]
+  stack[size] = nil
+  if item ~= NIL then return item else return nil end
+end
+
+function adepth()
+  return #stack
+end
+
+return stack
 end
 end
 
@@ -3066,7 +3257,7 @@ return utils
 end
 end
 
-__VERSION__="0.1-71"
+__VERSION__="0.1-297"
 
 local Compiler = require("compiler")
 local Optimizer = require("ast_optimizer")
@@ -3099,6 +3290,7 @@ alias: type #( type 1 1 )
 alias: max  #( math.max 2 1 )
 alias: min  #( math.min 2 1 )
 alias: # size
+alias: emit #( string.char 1 1 ) #( io.write 1 0 )
 
 : assert-true #( assert 1 0 ) ;
 : assert-false not assert-true ;
