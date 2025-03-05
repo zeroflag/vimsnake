@@ -43,10 +43,6 @@ function ast.pop3rd()
   return {name = "stack_consume", op  = "pop3rd"}
 end
 
-function ast.stack_peek(operation)
-  return {name = "stack_peek", op = operation}
-end
-
 function ast.stack_op(operation)
   return {name = "stack_op", op = operation}
 end
@@ -452,32 +448,6 @@ end
   8.) [ 1 2 3 ] DUP size   =>   PUSH(#TOS)
   9.) true false over not => PUSH(NOT TOS2)
 ]]--
-function InlineGeneralUnary:optimize(ast, i, result)
-  local p1, operator = ast[i], ast[i + 1]
-  local target
-  if is_push_unop_pop(operator) then
-    -- unary is embedded into a push
-    target = operator.exp
-  else
-    target = operator
-  end
-
-  if is_dup(p1) then
-    self:log(operator.name .. " (dup)")
-    target.exp.op = "tos"
-    target.exp.name ="stack_peek"
-  elseif is_over(p1) then
-    self:log(operator.name .. " (over)")
-    target.exp.op = "tos2"
-    target.exp.name ="stack_peek"
-  else
-    self:log(operator.name)
-    target.exp = p1.exp
-  end
-
-  table.insert(result, operator)
-end
-
 function InlineGeneralUnary:optimize(ast, i, result)
   local p1, operator = ast[i], ast[i + 1]
   local target
@@ -3253,11 +3223,16 @@ function utils.startswith(str, prefix)
   return string.sub(str, 1, #prefix) == prefix
 end
 
+function utils.module_available(name)
+  local ok, _ = pcall(require, name)
+  return ok
+end
+
 return utils
 end
 end
 
-__VERSION__="0.1-297"
+__VERSION__="0.1-398"
 
 local Compiler = require("compiler")
 local Optimizer = require("ast_optimizer")
@@ -3289,6 +3264,7 @@ alias: need #( require 1 1 )
 alias: type #( type 1 1 )
 alias: max  #( math.max 2 1 )
 alias: min  #( math.min 2 1 )
+alias: pow  #( math.pow 2 1 )
 alias: # size
 alias: emit #( string.char 1 1 ) #( io.write 1 0 )
 
